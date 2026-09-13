@@ -36,10 +36,7 @@ jobs:
           $text = Get-Content -Path $path -Raw
 
           $filterPattern = 'if \(desc\.Width < device_data\.render_resolution\.x \|\| desc\.Height < device_data\.render_resolution\.y\)\s*\r?\n\s*continue;'
-          $filterReplacement = @'
-if (desc.Width < device_data.render_resolution.x * 0.50f || desc.Height < device_data.render_resolution.y * 0.50f)
-               continue;
-'@
+          $filterReplacement = "if (desc.Width < device_data.render_resolution.x * 0.50f || desc.Height < device_data.render_resolution.y * 0.50f)`r`n               continue;"
           $patched = [regex]::Replace($text, $filterPattern, $filterReplacement, 1)
           if ($patched -eq $text) {
             throw "Could not find the TAA candidate resolution filter to patch."
@@ -47,11 +44,7 @@ if (desc.Width < device_data.render_resolution.x * 0.50f || desc.Height < device
           $text = $patched
 
           $scalePattern = 'device_data\.sr_render_resolution_scale = 1\.0f; // DLAA only'
-          $scaleReplacement = @'
-device_data.sr_render_resolution_scale = std::min(
-               game_device_data.render_resolution.x / static_cast<float>(taa_output_texture_desc.Width),
-               game_device_data.render_resolution.y / static_cast<float>(taa_output_texture_desc.Height)); // Experimental DLSS SR for BL3/TAAU
-'@
+          $scaleReplacement = "device_data.sr_render_resolution_scale = std::min(`r`n               game_device_data.render_resolution.x / static_cast<float>(taa_output_texture_desc.Width),`r`n               game_device_data.render_resolution.y / static_cast<float>(taa_output_texture_desc.Height)); // Experimental DLSS SR for BL3/TAAU"
           $patched = [regex]::Replace($text, $scalePattern, $scaleReplacement, 1)
           if ($patched -eq $text) {
             throw "Could not find the DLAA-only render scale assignment to patch."
