@@ -1,0 +1,83 @@
+name: Build BL3 DLSS SR test
+
+on:
+  push:
+    branches: [ bl3-dlss-sr-test ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout Luma
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v1.1.2
+
+      - name: Integrate vcpkg with MSBuild
+        shell: pwsh
+        run: '& "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" integrate install'
+
+      - name: Patch Unreal Engine SR path for sub-native TAA/TAAU
+        shell: pwsh
+        run: |
+          $path = "Source\Games\Unreal Engine\main.cpp"
+          $text = Get-Content -Path $path -Raw
+
+          $filterPattern = 'if \(desc\.Width < device_data\.render_resolution\.x \|\| desc\.Height < device_data\.render_resolution\.y\)\s*\r?\n\s*continue;'
+          $filterReplacement = @'
+if (desc.Width < device_data.render_resolution.x * 0.50f || desc.Height < device_data.render_resolution.y * 0.50f)
+               continue;
+'@
+          $patched = [regex]::Replace($text, $filterPattern, $filterReplacement, 1)
+          if ($patched -eq $text) {
+            throw "Could not find the TAA candidate resolution filter to patch."
+          }
+          $text = $patched
+
+          $scalePattern = 'device_data\.sr_render_resolution_scale = 1\.0f; // DLAA only'
+          $scaleReplacement = @'
+device_data.sr_render_resolution_scale = std::min(
+               game_device_data.render_resolution.x / static_cast<float>(taa_output_texture_desc.Width),
+               game_device_data.render_resolution.y / static_cast<float>(taa_output_texture_desc.Height)); // Experimental DLSS SR for BL3/TAAU
+'@
+          $patched = [regex]::Replace($text, $scalePattern, $scaleReplacement, 1)
+          if ($patched -eq $text) {
+            throw "Could not find the DLAA-only render scale assignment to patch."
+          }
+          $text = $patched
+
+          Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
+
+          Write-Host "Patched Unreal Engine main.cpp successfully."
+          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR" -Context 2,3
+
+      - name: Build ReShade x64 dependency
+        shell: pwsh
+        run: msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="64-bit" /p:PlatformToolset=v145
+
+      - name: Build Luma Unreal Engine x64
+        shell: pwsh
+        run: msbuild "Source\Games\Unreal Engine\Unreal Engine.vcxproj" /p:Configuration="Publishing-Release" /p:Platform="x64" /p:DefineConstants="REMOTE_BUILD=1"
+
+      - name: Verify addon
+        shell: pwsh
+        run: |
+          $addon = "Binaries\x64-Publishing-Release\Luma-Unreal Engine.addon"
+          if (-not (Test-Path $addon)) {
+            Write-Host "Build output directory:"
+            Get-ChildItem -Path "Binaries" -Recurse -ErrorAction SilentlyContinue
+            throw "Luma-Unreal Engine.addon was not produced."
+          }
+          Get-Item $addon | Format-List FullName,Length,LastWriteTime
+
+      - name: Upload patched addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: BL3-Luma-DLSS-SR-test
+          path: Binaries/x64-Publishing-Release/Luma-Unreal Engine.addon
+          if-no-files-found: error
