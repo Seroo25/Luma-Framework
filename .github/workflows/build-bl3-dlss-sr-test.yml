@@ -56,17 +56,34 @@ jobs:
           if ($patched -eq $text) { throw "Could not remove the single-TAA early return." }
           $text = $patched
 
-          # Critical for ScreenPercentage/TAAU: Luma's game render resolution was left at swapchain size.
-          # Synchronize it with UE's ViewSizeAndInvSize so DLSS is told the actual internal render size.
+          # Critical for ScreenPercentage/TAAU: synchronize Luma's game render resolution
+          # with UE's ViewSizeAndInvSize so DLSS receives the true internal resolution.
           $renderResPattern = 'device_data\.render_resolution\.x = vsize_and_inv_size\.x;\s*\r?\n\s*device_data\.render_resolution\.y = vsize_and_inv_size\.y;'
           $renderResReplacement = "device_data.render_resolution.x = vsize_and_inv_size.x;`r`n            device_data.render_resolution.y = vsize_and_inv_size.y;`r`n            game_device_data.render_resolution = {vsize_and_inv_size.x, vsize_and_inv_size.y, vsize_and_inv_size.z, vsize_and_inv_size.w};"
           $matches = [regex]::Matches($text, $renderResPattern).Count
           if ($matches -lt 2) { throw "Expected two UE render-resolution update sites, found $matches." }
           $text = [regex]::Replace($text, $renderResPattern, $renderResReplacement)
 
+          # Borderlands 3 log showed four TAA-like permutations. At the exact moment
+          # ScreenPercentage 75 was enabled, 0x8F47085C appeared. When rendering
+          # below output resolution, only allow that pass to invoke DLSS. This avoids
+          # running/copying DLSS several times per frame, which caused ~24 FPS and shaking.
+          $shaderHashPattern = 'uint64_t shader_hash = is_compute_shader \? original_shader_hashes\.compute_shaders\[0\] : original_shader_hashes\.pixel_shaders\[0\];'
+          $shaderHashReplacement = @'
+uint64_t shader_hash = is_compute_shader ? original_shader_hashes.compute_shaders[0] : original_shader_hashes.pixel_shaders[0];
+      const bool bl3_subnative_render =
+         device_data.render_resolution.x + 1.0f < device_data.output_resolution.x ||
+         device_data.render_resolution.y + 1.0f < device_data.output_resolution.y;
+      if (bl3_subnative_render && shader_hash != 0x8F47085CULL)
+         return DrawOrDispatchOverrideType::None;
+'@
+          $patched = [regex]::Replace($text, $shaderHashPattern, $shaderHashReplacement, 1)
+          if ($patched -eq $text) { throw "Could not insert BL3 sub-native TAAU shader filter." }
+          $text = $patched
+
           Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
           Write-Host "Patched Unreal Engine main.cpp successfully."
-          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR|TAA/TAAU Detection|game_device_data.render_resolution =" -Context 1,2
+          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR|TAA/TAAU Detection|game_device_data.render_resolution =|8F47085C" -Context 1,3
 
       - name: Build ReShade x64 dependency
         shell: pwsh
@@ -92,6 +109,6 @@ jobs:
       - name: Upload patched addon
         uses: actions/upload-artifact@v4
         with:
-          name: BL3-Luma-DLSS-SR-test
+          name: BL3-Luma-DLSS-SR-test-v4
           path: Source/Games/Unreal Engine/Binaries/x64-Publishing-Release/Luma-Unreal Engine.addon
           if-no-files-found: error
