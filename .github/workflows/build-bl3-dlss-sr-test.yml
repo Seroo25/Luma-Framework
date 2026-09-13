@@ -38,22 +38,17 @@ jobs:
           $filterPattern = 'if \(desc\.Width < device_data\.render_resolution\.x \|\| desc\.Height < device_data\.render_resolution\.y\)\s*\r?\n\s*continue;'
           $filterReplacement = "if (desc.Width < device_data.render_resolution.x * 0.50f || desc.Height < device_data.render_resolution.y * 0.50f)`r`n               continue;"
           $patched = [regex]::Replace($text, $filterPattern, $filterReplacement, 1)
-          if ($patched -eq $text) {
-            throw "Could not find the TAA candidate resolution filter to patch."
-          }
+          if ($patched -eq $text) { throw "Could not find the TAA candidate resolution filter to patch." }
           $text = $patched
 
           $scalePattern = 'device_data\.sr_render_resolution_scale = 1\.0f; // DLAA only'
           $scaleReplacement = "const float sr_scale_x = game_device_data.render_resolution.x / static_cast<float>(taa_output_texture_desc.Width);`r`n            const float sr_scale_y = game_device_data.render_resolution.y / static_cast<float>(taa_output_texture_desc.Height);`r`n            device_data.sr_render_resolution_scale = sr_scale_x < sr_scale_y ? sr_scale_x : sr_scale_y; // Experimental DLSS SR for BL3/TAAU"
           $patched = [regex]::Replace($text, $scalePattern, $scaleReplacement, 1)
-          if ($patched -eq $text) {
-            throw "Could not find the DLAA-only render scale assignment to patch."
-          }
+          if ($patched -eq $text) { throw "Could not find the DLAA-only render scale assignment to patch." }
           $text = $patched
 
           Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
           Write-Host "Patched Unreal Engine main.cpp successfully."
-          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR" -Context 2,4
 
       - name: Build ReShade x64 dependency
         shell: pwsh
@@ -63,16 +58,18 @@ jobs:
         shell: pwsh
         run: msbuild "Source\Games\Unreal Engine\Unreal Engine.vcxproj" /p:Configuration="Publishing-Release" /p:Platform="x64" /p:PlatformToolset=v143 /p:DefineConstants="REMOTE_BUILD=1"
 
-      - name: Verify addon
+      - name: Normalize addon filename
         shell: pwsh
         run: |
-          $addon = "Source\Games\Unreal Engine\Binaries\x64-Publishing-Release\Luma-Unreal Engine.addon"
-          if (-not (Test-Path $addon)) {
-            Write-Host "Build output directories:"
-            Get-ChildItem -Path "Source\Games\Unreal Engine\Binaries" -Recurse -ErrorAction SilentlyContinue
-            throw "Luma-Unreal Engine.addon was not produced."
+          $dir = "Source\Games\Unreal Engine\Binaries\x64-Publishing-Release"
+          $built = Get-ChildItem -Path $dir -Filter "*Unreal Engine.addon" | Select-Object -First 1
+          if (-not $built) {
+            Get-ChildItem -Path $dir -ErrorAction SilentlyContinue
+            throw "Unreal Engine addon was not produced."
           }
-          Get-Item $addon | Format-List FullName,Length,LastWriteTime
+          $target = Join-Path $dir "Luma-Unreal Engine.addon"
+          Copy-Item -LiteralPath $built.FullName -Destination $target -Force
+          Get-Item $target | Format-List FullName,Length,LastWriteTime
 
       - name: Upload patched addon
         uses: actions/upload-artifact@v4
