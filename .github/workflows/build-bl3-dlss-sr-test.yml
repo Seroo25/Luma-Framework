@@ -44,7 +44,7 @@ jobs:
           $text = $patched
 
           $scalePattern = 'device_data\.sr_render_resolution_scale = 1\.0f; // DLAA only'
-          $scaleReplacement = "device_data.sr_render_resolution_scale = std::min(`r`n               game_device_data.render_resolution.x / static_cast<float>(taa_output_texture_desc.Width),`r`n               game_device_data.render_resolution.y / static_cast<float>(taa_output_texture_desc.Height)); // Experimental DLSS SR for BL3/TAAU"
+          $scaleReplacement = "const float sr_scale_x = game_device_data.render_resolution.x / static_cast<float>(taa_output_texture_desc.Width);`r`n            const float sr_scale_y = game_device_data.render_resolution.y / static_cast<float>(taa_output_texture_desc.Height);`r`n            device_data.sr_render_resolution_scale = sr_scale_x < sr_scale_y ? sr_scale_x : sr_scale_y; // Experimental DLSS SR for BL3/TAAU"
           $patched = [regex]::Replace($text, $scalePattern, $scaleReplacement, 1)
           if ($patched -eq $text) {
             throw "Could not find the DLAA-only render scale assignment to patch."
@@ -53,7 +53,7 @@ jobs:
 
           Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
           Write-Host "Patched Unreal Engine main.cpp successfully."
-          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR" -Context 2,3
+          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR" -Context 2,4
 
       - name: Build ReShade x64 dependency
         shell: pwsh
@@ -66,10 +66,10 @@ jobs:
       - name: Verify addon
         shell: pwsh
         run: |
-          $addon = "Binaries\x64-Publishing-Release\Luma-Unreal Engine.addon"
+          $addon = "Source\Games\Unreal Engine\Binaries\x64-Publishing-Release\Luma-Unreal Engine.addon"
           if (-not (Test-Path $addon)) {
-            Write-Host "Build output directory:"
-            Get-ChildItem -Path "Binaries" -Recurse -ErrorAction SilentlyContinue
+            Write-Host "Build output directories:"
+            Get-ChildItem -Path "Source\Games\Unreal Engine\Binaries" -Recurse -ErrorAction SilentlyContinue
             throw "Luma-Unreal Engine.addon was not produced."
           }
           Get-Item $addon | Format-List FullName,Length,LastWriteTime
@@ -78,5 +78,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BL3-Luma-DLSS-SR-test
-          path: Binaries/x64-Publishing-Release/Luma-Unreal Engine.addon
+          path: Source/Games/Unreal Engine/Binaries/x64-Publishing-Release/Luma-Unreal Engine.addon
           if-no-files-found: error
