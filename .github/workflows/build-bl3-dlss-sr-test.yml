@@ -35,27 +35,38 @@ jobs:
           $path = "Source\Games\Unreal Engine\main.cpp"
           $text = Get-Content -Path $path -Raw
 
+          # Allow TAA/TAAU candidate resources below native/output resolution.
           $filterPattern = 'if \(desc\.Width < device_data\.render_resolution\.x \|\| desc\.Height < device_data\.render_resolution\.y\)\s*\r?\n\s*continue;'
           $filterReplacement = "if (desc.Width < device_data.render_resolution.x * 0.50f || desc.Height < device_data.render_resolution.y * 0.50f)`r`n               continue;"
           $patched = [regex]::Replace($text, $filterPattern, $filterReplacement, 1)
           if ($patched -eq $text) { throw "Could not find the TAA candidate resolution filter to patch." }
           $text = $patched
 
+          # Stop forcing DLAA-only scaling and derive SR scale from render/output sizes.
           $scalePattern = 'device_data\.sr_render_resolution_scale = 1\.0f; // DLAA only'
           $scaleReplacement = "const float sr_scale_x = game_device_data.render_resolution.x / static_cast<float>(taa_output_texture_desc.Width);`r`n            const float sr_scale_y = game_device_data.render_resolution.y / static_cast<float>(taa_output_texture_desc.Height);`r`n            device_data.sr_render_resolution_scale = sr_scale_x < sr_scale_y ? sr_scale_x : sr_scale_y; // Experimental DLSS SR for BL3/TAAU"
           $patched = [regex]::Replace($text, $scalePattern, $scaleReplacement, 1)
           if ($patched -eq $text) { throw "Could not find the DLAA-only render scale assignment to patch." }
           $text = $patched
 
+          # Keep detecting additional TAA/TAAU shader permutations after native TAA has been detected.
           $taaDetectionPattern = '// TAA Detection \(only if we haven''t found TAA yet\)\s*\r?\n\s*if \(!shader_hashes_TAA\.Empty\(\)\)\s*\r?\n\s*return nullptr;'
           $taaDetectionReplacement = '// TAA/TAAU Detection: keep scanning for additional shader permutations even after one TAA shader was confirmed.'
           $patched = [regex]::Replace($text, $taaDetectionPattern, $taaDetectionReplacement, 1)
           if ($patched -eq $text) { throw "Could not remove the single-TAA early return." }
           $text = $patched
 
+          # Critical for ScreenPercentage/TAAU: Luma's game render resolution was left at swapchain size.
+          # Synchronize it with UE's ViewSizeAndInvSize so DLSS is told the actual internal render size.
+          $renderResPattern = 'device_data\.render_resolution\.x = vsize_and_inv_size\.x;\s*\r?\n\s*device_data\.render_resolution\.y = vsize_and_inv_size\.y;'
+          $renderResReplacement = "device_data.render_resolution.x = vsize_and_inv_size.x;`r`n            device_data.render_resolution.y = vsize_and_inv_size.y;`r`n            game_device_data.render_resolution = {vsize_and_inv_size.x, vsize_and_inv_size.y, vsize_and_inv_size.z, vsize_and_inv_size.w};"
+          $matches = [regex]::Matches($text, $renderResPattern).Count
+          if ($matches -lt 2) { throw "Expected two UE render-resolution update sites, found $matches." }
+          $text = [regex]::Replace($text, $renderResPattern, $renderResReplacement)
+
           Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
           Write-Host "Patched Unreal Engine main.cpp successfully."
-          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR|TAA/TAAU Detection" -Context 1,2
+          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR|TAA/TAAU Detection|game_device_data.render_resolution =" -Context 1,2
 
       - name: Build ReShade x64 dependency
         shell: pwsh
