@@ -47,8 +47,15 @@ jobs:
           if ($patched -eq $text) { throw "Could not find the DLAA-only render scale assignment to patch." }
           $text = $patched
 
+          $taaDetectionPattern = '// TAA Detection \(only if we haven''t found TAA yet\)\s*\r?\n\s*if \(!shader_hashes_TAA\.Empty\(\)\)\s*\r?\n\s*return nullptr;'
+          $taaDetectionReplacement = '// TAA/TAAU Detection: keep scanning for additional shader permutations even after one TAA shader was confirmed.'
+          $patched = [regex]::Replace($text, $taaDetectionPattern, $taaDetectionReplacement, 1)
+          if ($patched -eq $text) { throw "Could not remove the single-TAA early return." }
+          $text = $patched
+
           Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
           Write-Host "Patched Unreal Engine main.cpp successfully."
+          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR|TAA/TAAU Detection" -Context 1,2
 
       - name: Build ReShade x64 dependency
         shell: pwsh
