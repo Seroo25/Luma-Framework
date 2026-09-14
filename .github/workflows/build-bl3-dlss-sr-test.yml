@@ -1,4 +1,4 @@
-name: Build BL3 DLSS SR test
+name: Build BL3 DLSS SR diagnostic
 
 on:
   push:
@@ -29,48 +29,93 @@ jobs:
             }
           }
 
-      - name: Patch Unreal Engine SR path for sub-native TAA/TAAU
+      - name: Patch Unreal Engine SR path and add BL3 diagnostics
         shell: pwsh
         run: |
           $path = "Source\Games\Unreal Engine\main.cpp"
           $text = Get-Content -Path $path -Raw
 
+          # Allow TAA/TAAU candidates below native/output resolution.
           $filterPattern = 'if \(desc\.Width < device_data\.render_resolution\.x \|\| desc\.Height < device_data\.render_resolution\.y\)\s*\r?\n\s*continue;'
           $filterReplacement = "if (desc.Width < device_data.render_resolution.x * 0.50f || desc.Height < device_data.render_resolution.y * 0.50f)`r`n               continue;"
           $patched = [regex]::Replace($text, $filterPattern, $filterReplacement, 1)
           if ($patched -eq $text) { throw "Could not find the TAA candidate resolution filter to patch." }
           $text = $patched
 
+          # Enable DLSS SR scaling rather than DLAA-only.
           $scalePattern = 'device_data\.sr_render_resolution_scale = 1\.0f; // DLAA only'
           $scaleReplacement = "const float sr_scale_x = game_device_data.render_resolution.x / static_cast<float>(taa_output_texture_desc.Width);`r`n            const float sr_scale_y = game_device_data.render_resolution.y / static_cast<float>(taa_output_texture_desc.Height);`r`n            device_data.sr_render_resolution_scale = sr_scale_x < sr_scale_y ? sr_scale_x : sr_scale_y; // Experimental DLSS SR for BL3/TAAU"
           $patched = [regex]::Replace($text, $scalePattern, $scaleReplacement, 1)
           if ($patched -eq $text) { throw "Could not find the DLAA-only render scale assignment to patch." }
           $text = $patched
 
+          # Keep scanning for TAAU permutations.
           $taaDetectionPattern = '// TAA Detection \(only if we haven''t found TAA yet\)\s*\r?\n\s*if \(!shader_hashes_TAA\.Empty\(\)\)\s*\r?\n\s*return nullptr;'
           $taaDetectionReplacement = '// TAA/TAAU Detection: keep scanning for additional shader permutations even after one TAA shader was confirmed.'
           $patched = [regex]::Replace($text, $taaDetectionPattern, $taaDetectionReplacement, 1)
           if ($patched -eq $text) { throw "Could not remove the single-TAA early return." }
           $text = $patched
 
+          # Synchronize UE internal render resolution with the Luma game data used by DLSS.
           $renderResPattern = 'device_data\.render_resolution\.x = vsize_and_inv_size\.x;\s*\r?\n\s*device_data\.render_resolution\.y = vsize_and_inv_size\.y;'
           $renderResReplacement = "device_data.render_resolution.x = vsize_and_inv_size.x;`r`n            device_data.render_resolution.y = vsize_and_inv_size.y;`r`n            game_device_data.render_resolution = {vsize_and_inv_size.x, vsize_and_inv_size.y, vsize_and_inv_size.z, vsize_and_inv_size.w};"
           $matches = [regex]::Matches($text, $renderResPattern).Count
           if ($matches -lt 2) { throw "Expected two UE render-resolution update sites, found $matches." }
           $text = [regex]::Replace($text, $renderResPattern, $renderResReplacement)
 
-          # At 75% the BL3 log detected 0x8F47085C right when ScreenPercentage changed.
-          # Use only that TAAU pass for sub-native DLSS so Luma does not run DLSS on
-          # several TAA-like passes in the same frame.
-          $shaderHashPattern = 'uint64_t shader_hash = is_compute_shader \? original_shader_hashes\.compute_shaders\[0\] : original_shader_hashes\.pixel_shaders\[0\];'
-          $shaderHashReplacement = "uint64_t shader_hash = is_compute_shader ? original_shader_hashes.compute_shaders[0] : original_shader_hashes.pixel_shaders[0];`r`n      const bool bl3_subnative_render =`r`n         device_data.render_resolution.x + 1.0f < device_data.output_resolution.x ||`r`n         device_data.render_resolution.y + 1.0f < device_data.output_resolution.y;`r`n      if (bl3_subnative_render && shader_hash != 0x8F47085CULL)`r`n         return DrawOrDispatchOverrideType::None;"
-          $patched = [regex]::Replace($text, $shaderHashPattern, $shaderHashReplacement, 1)
-          if ($patched -eq $text) { throw "Could not insert BL3 sub-native TAAU shader filter." }
+          # Diagnostic: log each TAA/TAAU hash once, including its source/output sizes and
+          # UE view size. This lets us identify the real 75% TAAU pass instead of guessing.
+          $diagPattern = 'output_color->GetDesc\(&taa_output_texture_desc\);'
+          $diagReplacement = @'
+output_color->GetDesc(&taa_output_texture_desc);
+
+            {
+               static std::unordered_set<uint64_t> bl3_logged_taa_hashes;
+               if (bl3_logged_taa_hashes.insert(shader_hash).second)
+               {
+                  UINT src_width = 0;
+                  UINT src_height = 0;
+                  if (taa_shader_info.source_texture_register < ARRAYSIZE(shader_resources) && shader_resources[taa_shader_info.source_texture_register].get() != nullptr)
+                  {
+                     com_ptr<ID3D11Resource> bl3_source_resource;
+                     shader_resources[taa_shader_info.source_texture_register]->GetResource(&bl3_source_resource);
+                     if (bl3_source_resource.get() != nullptr)
+                     {
+                        com_ptr<ID3D11Texture2D> bl3_source_texture;
+                        if (SUCCEEDED(bl3_source_resource->QueryInterface(&bl3_source_texture)) && bl3_source_texture.get() != nullptr)
+                        {
+                           D3D11_TEXTURE2D_DESC bl3_source_desc{};
+                           bl3_source_texture->GetDesc(&bl3_source_desc);
+                           src_width = bl3_source_desc.Width;
+                           src_height = bl3_source_desc.Height;
+                        }
+                     }
+                  }
+
+                  reshade::log::message(
+                     reshade::log::level::info,
+                     std::format(
+                        "BL3-DIAG TAA hash=0x{:08X} type={} source={}x{} output={}x{} ue_view={}x{} swap_output={}x{}",
+                        shader_hash,
+                        is_compute_shader ? "CS" : "PS",
+                        src_width,
+                        src_height,
+                        taa_output_texture_desc.Width,
+                        taa_output_texture_desc.Height,
+                        static_cast<UINT>(game_device_data.render_resolution.x),
+                        static_cast<UINT>(game_device_data.render_resolution.y),
+                        static_cast<UINT>(device_data.output_resolution.x),
+                        static_cast<UINT>(device_data.output_resolution.y)).c_str());
+               }
+            }
+'@
+          $patched = [regex]::Replace($text, $diagPattern, $diagReplacement, 1)
+          if ($patched -eq $text) { throw "Could not insert BL3 TAA diagnostic logging." }
           $text = $patched
 
           Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
           Write-Host "Patched Unreal Engine main.cpp successfully."
-          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR|TAA/TAAU Detection|game_device_data.render_resolution =|8F47085C" -Context 1,3
+          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR|TAA/TAAU Detection|game_device_data.render_resolution =|BL3-DIAG" -Context 1,3
 
       - name: Build ReShade x64 dependency
         shell: pwsh
@@ -93,9 +138,9 @@ jobs:
           Copy-Item -LiteralPath $built.FullName -Destination $target -Force
           Get-Item $target | Format-List FullName,Length,LastWriteTime
 
-      - name: Upload patched addon
+      - name: Upload diagnostic addon
         uses: actions/upload-artifact@v4
         with:
-          name: BL3-Luma-DLSS-SR-test-v4
+          name: BL3-Luma-DLSS-SR-diagnostic-v5
           path: Source/Games/Unreal Engine/Binaries/x64-Publishing-Release/Luma-Unreal Engine.addon
           if-no-files-found: error
