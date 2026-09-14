@@ -1,4 +1,4 @@
-name: Build BL3 DLSS SR auto TAAU 85
+name: Build BL3 DLSS SR auto 85 v9
 
 on:
   push:
@@ -30,13 +30,13 @@ jobs:
             }
           }
 
-      - name: Patch BL3 Luma DLSS SR and automatic TAAU
+      - name: Patch BL3 Luma DLSS SR and TAAU shader handling
         shell: pwsh
         run: ./.github/scripts/patch_bl3_v7.ps1
 
-      - name: Force BL3 ScreenPercentage 85
+      - name: Patch exact BL3 CVar offsets for automatic TAAU and 85 percent
         shell: pwsh
-        run: ./.github/scripts/patch_bl3_v8_screenpercentage.ps1
+        run: ./.github/scripts/patch_bl3_v9_known_offsets.ps1
 
       - name: Build ReShade x64 dependency
         shell: pwsh
@@ -62,6 +62,6 @@ jobs:
       - name: Upload addon
         uses: actions/upload-artifact@v4
         with:
-          name: BL3-Luma-DLSS-SR-auto85-v8
+          name: BL3-Luma-DLSS-SR-auto85-v9
           path: Source/Games/Unreal Engine/Binaries/x64-Publishing-Release/Luma-Unreal Engine.addon
           if-no-files-found: error
