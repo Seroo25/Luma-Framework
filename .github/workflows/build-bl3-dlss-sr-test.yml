@@ -1,4 +1,4 @@
-name: Build BL3 DLSS SR targeted test
+name: Build BL3 DLSS SR auto TAAU
 
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
             }
           }
 
-      - name: Patch Unreal Engine SR path for BL3 TAAU
+      - name: Patch Unreal Engine SR path for BL3 and force TAAU
         shell: pwsh
         run: |
           $path = "Source\Games\Unreal Engine\main.cpp"
@@ -59,19 +59,174 @@ jobs:
           if ($matches -lt 2) { throw "Expected two UE render-resolution update sites, found $matches." }
           $text = [regex]::Replace($text, $renderResPattern, $renderResReplacement)
 
-          # Log timing showed 0x3E42A7F7 appears when TemporalAA.Upsampling is enabled,
-          # while 0x8F47085C appears only after ScreenPercentage changes. v4 proved
-          # 0x8F47085C is not the pass that successfully runs NGX. Keep only the TAAU
-          # pass that was already active while the NVIDIA indicator still worked.
+          # BL3 TAAU pass identified from the user's logs.
           $shaderHashPattern = 'uint64_t shader_hash = is_compute_shader \? original_shader_hashes\.compute_shaders\[0\] : original_shader_hashes\.pixel_shaders\[0\];'
           $shaderHashReplacement = "uint64_t shader_hash = is_compute_shader ? original_shader_hashes.compute_shaders[0] : original_shader_hashes.pixel_shaders[0];`r`n      const bool bl3_subnative_render =`r`n         device_data.render_resolution.x + 1.0f < device_data.output_resolution.x ||`r`n         device_data.render_resolution.y + 1.0f < device_data.output_resolution.y;`r`n      if (bl3_subnative_render && shader_hash != 0x3E42A7F7ULL)`r`n         return DrawOrDispatchOverrideType::None;"
           $patched = [regex]::Replace($text, $shaderHashPattern, $shaderHashReplacement, 1)
           if ($patched -eq $text) { throw "Could not insert BL3 sub-native TAAU shader filter." }
           $text = $patched
 
+          # Runtime helper: locate UE4's TAutoConsoleVariable<int32> for
+          # r.TemporalAA.Upsampling by its UTF-16 name xref in Borderlands3.exe,
+          # then force both game/render-thread shadow values to 1 every frame.
+          $helper = @'
+
+   static int32_t* bl3_temporal_upsampling_data = nullptr;
+   static bool bl3_temporal_upsampling_search_done = false;
+   static bool bl3_temporal_upsampling_logged = false;
+
+   static bool BL3MemoryWritable(const void* address, size_t size)
+   {
+      MEMORY_BASIC_INFORMATION mbi{};
+      if (VirtualQuery(address, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+         return false;
+
+      const DWORD protection = mbi.Protect & 0xFF;
+      const bool writable = protection == PAGE_READWRITE || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
+      if (!writable)
+         return false;
+
+      const uintptr_t start = reinterpret_cast<uintptr_t>(address);
+      const uintptr_t end = start + size;
+      const uintptr_t region_end = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+      return end <= region_end;
+   }
+
+   static int32_t* BL3FindTemporalUpsamplingData()
+   {
+      auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+      if (base == nullptr)
+         return nullptr;
+
+      auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+      if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+         return nullptr;
+      auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+      if (nt->Signature != IMAGE_NT_SIGNATURE)
+         return nullptr;
+
+      constexpr wchar_t needle[] = L"r.TemporalAA.Upsampling";
+      constexpr size_t needle_bytes = sizeof(needle) - sizeof(wchar_t);
+      uint8_t* name_address = nullptr;
+      auto* sections = IMAGE_FIRST_SECTION(nt);
+
+      for (WORD s = 0; s < nt->FileHeader.NumberOfSections && name_address == nullptr; ++s)
+      {
+         const auto& section = sections[s];
+         if ((section.Characteristics & IMAGE_SCN_MEM_READ) == 0)
+            continue;
+         const size_t section_size = static_cast<size_t>(section.Misc.VirtualSize);
+         if (section_size < needle_bytes)
+            continue;
+         uint8_t* section_base = base + section.VirtualAddress;
+         for (size_t i = 0; i + needle_bytes <= section_size; ++i)
+         {
+            if (std::memcmp(section_base + i, needle, needle_bytes) == 0)
+            {
+               name_address = section_base + i;
+               break;
+            }
+         }
+      }
+
+      if (name_address == nullptr)
+         return nullptr;
+
+      for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s)
+      {
+         const auto& section = sections[s];
+         if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0)
+            continue;
+
+         uint8_t* section_base = base + section.VirtualAddress;
+         const size_t section_size = static_cast<size_t>(section.Misc.VirtualSize);
+         if (section_size < 7)
+            continue;
+
+         for (size_t i = 0; i + 7 <= section_size; ++i)
+         {
+            uint8_t* instruction = section_base + i;
+            // lea rdx, [rip+disp32] -> Name argument of TAutoConsoleVariable constructor
+            if (instruction[0] != 0x48 || instruction[1] != 0x8D || instruction[2] != 0x15)
+               continue;
+
+            int32_t name_disp = 0;
+            std::memcpy(&name_disp, instruction + 3, sizeof(name_disp));
+            uint8_t* referenced = instruction + 7 + name_disp;
+            if (referenced != name_address)
+               continue;
+
+            const size_t back = i > 128 ? i - 128 : 0;
+            for (size_t j = i; j-- > back; )
+            {
+               uint8_t* candidate_instruction = section_base + j;
+               // lea rcx, [rip+disp32] -> this pointer for the global TAutoConsoleVariable
+               if (candidate_instruction[0] != 0x48 || candidate_instruction[1] != 0x8D || candidate_instruction[2] != 0x0D)
+                  continue;
+
+               int32_t object_disp = 0;
+               std::memcpy(&object_disp, candidate_instruction + 3, sizeof(object_disp));
+               uint8_t* object_address = candidate_instruction + 7 + object_disp;
+
+               // MSVC x64 layout: vptr @ +0, FAutoConsoleObject::Target @ +8,
+               // TAutoConsoleVariable<int32>::Ref @ +16.
+               if (!BL3MemoryWritable(object_address, 0x18))
+                  continue;
+               auto** ref_slot = reinterpret_cast<int32_t**>(object_address + 0x10);
+               if (!BL3MemoryWritable(ref_slot, sizeof(*ref_slot)))
+                  continue;
+               int32_t* ref = *ref_slot;
+               if (ref == nullptr || !BL3MemoryWritable(ref, sizeof(int32_t) * 2))
+                  continue;
+               if ((ref[0] == 0 || ref[0] == 1) && (ref[1] == 0 || ref[1] == 1))
+               {
+                  reshade::log::message(reshade::log::level::info, "[Luma] BL3: Found r.TemporalAA.Upsampling runtime data; auto-forcing TAAU=1.");
+                  return ref;
+               }
+            }
+         }
+      }
+
+      return nullptr;
+   }
+
+   static void BL3ForceTemporalUpsampling()
+   {
+      if (!bl3_temporal_upsampling_search_done)
+      {
+         bl3_temporal_upsampling_data = BL3FindTemporalUpsamplingData();
+         bl3_temporal_upsampling_search_done = true;
+         if (bl3_temporal_upsampling_data == nullptr)
+            reshade::log::message(reshade::log::level::warning, "[Luma] BL3: Could not locate r.TemporalAA.Upsampling runtime data. UUU may still be required.");
+      }
+
+      if (bl3_temporal_upsampling_data != nullptr && BL3MemoryWritable(bl3_temporal_upsampling_data, sizeof(int32_t) * 2))
+      {
+         bl3_temporal_upsampling_data[0] = 1;
+         bl3_temporal_upsampling_data[1] = 1;
+         if (!bl3_temporal_upsampling_logged)
+         {
+            bl3_temporal_upsampling_logged = true;
+            reshade::log::message(reshade::log::level::info, "[Luma] BL3: Automatic TemporalAA upsampling is active.");
+         }
+      }
+   }
+'@
+          $namespaceEndPattern = '\}\s*// namespace\s*\r?\n\s*\r?\nstruct GameDeviceDataUnrealEngine'
+          $namespaceEndReplacement = $helper + "`r`n} // namespace`r`n`r`nstruct GameDeviceDataUnrealEngine"
+          $patched = [regex]::Replace($text, $namespaceEndPattern, $namespaceEndReplacement, 1)
+          if ($patched -eq $text) { throw "Could not insert BL3 automatic TAAU helper." }
+          $text = $patched
+
+          $presentPattern = 'void OnPresent\(ID3D11Device\* native_device, DeviceData& device_data\) override\s*\r?\n\s*\{'
+          $presentReplacement = "void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override`r`n   {`r`n      BL3ForceTemporalUpsampling();"
+          $patched = [regex]::Replace($text, $presentPattern, $presentReplacement, 1)
+          if ($patched -eq $text) { throw "Could not hook BL3 automatic TAAU into OnPresent." }
+          $text = $patched
+
           Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
           Write-Host "Patched Unreal Engine main.cpp successfully."
-          Select-String -Path $path -Pattern "0.50f|Experimental DLSS SR|TAA/TAAU Detection|game_device_data.render_resolution =|3E42A7F7" -Context 1,3
+          Select-String -Path $path -Pattern "Experimental DLSS SR|3E42A7F7|BL3ForceTemporalUpsampling|TemporalAA.Upsampling runtime" -Context 1,3
 
       - name: Build ReShade x64 dependency
         shell: pwsh
@@ -94,9 +249,9 @@ jobs:
           Copy-Item -LiteralPath $built.FullName -Destination $target -Force
           Get-Item $target | Format-List FullName,Length,LastWriteTime
 
-      - name: Upload targeted addon
+      - name: Upload addon
         uses: actions/upload-artifact@v4
         with:
-          name: BL3-Luma-DLSS-SR-targeted-v6
+          name: BL3-Luma-DLSS-SR-autoTAAU-v7
           path: Source/Games/Unreal Engine/Binaries/x64-Publishing-Release/Luma-Unreal Engine.addon
           if-no-files-found: error
