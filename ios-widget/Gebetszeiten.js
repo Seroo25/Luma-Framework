@@ -247,8 +247,49 @@ const widget = await buildWidget();
 if (config.runsInWidget) {
   Script.setWidget(widget);
 } else {
+  // Hilfe zur Fehlersuche: Wenn nichts gelesen werden konnte, Diagnose erstellen
+  if (!readCache()) await diagnose();
   await widget.presentMedium();
-  // Hilfe zur Fehlersuche: Wenn nichts gelesen werden konnte, Seitentext anzeigen
-  if (!readCache() && lastRawText) await QuickLook.present(lastRawText.replace(/\s+/g, " ").slice(0, 4000));
 }
+
+// Fehlersuche: sammelt, was das Script auf der Seite sieht, und kopiert es in die Zwischenablage
+async function diagnose() {
+  const out = [];
+  const around = (t, word) => {
+    const i = t.search(new RegExp(word, "i"));
+    return i < 0 ? "(nicht gefunden)" : t.slice(Math.max(0, i - 300), i + 500);
+  };
+  try {
+    const req = new Request(SOURCE_URL);
+    req.timeoutInterval = 20;
+    const html = await req.loadString();
+    out.push(`REQUEST: Status ${req.response.statusCode}, ${html.length} Zeichen`);
+    const srcs = [...html.matchAll(/<(?:script|iframe)[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]);
+    out.push("SCRIPTS/IFRAMES:\n" + srcs.join("\n"));
+    const urls = [...new Set([...html.matchAll(/https?:[^"'\s<>)]+/g)].map((m) => m[0]))]
+      .filter((u) => /api|json|ajax|prayer|gebet|salah|times|mawaqit|wp-json|admin-ajax/i.test(u));
+    out.push("INTERESSANTE URLS:\n" + urls.join("\n"));
+    out.push("HTML BEI 'Maghrib':\n" + around(html, "Maghrib"));
+    out.push("TEXT BEI 'Maghrib':\n" + around(htmlToText(html).replace(/\s+/g, " "), "Maghrib"));
+  } catch (e) {
+    out.push("REQUEST FEHLER: " + e);
+  }
+  try {
+    const t = await loadViaWebView();
+    out.push(`WEBVIEW: ${t.length} Zeichen`);
+    out.push("WEBVIEW BEI 'Maghrib':\n" + around(t.replace(/\s+/g, " "), "Maghrib"));
+    out.push("WEBVIEW ANFANG:\n" + t.replace(/\s+/g, " ").slice(0, 1500));
+  } catch (e) {
+    out.push("WEBVIEW FEHLER: " + e);
+  }
+  const report = out.join("\n\n────────\n\n");
+  Pasteboard.copy(report);
+  const a = new Alert();
+  a.title = "Diagnose kopiert";
+  a.message = "Der Bericht ist in der Zwischenablage. Füge ihn im Chat ein (Einsetzen).";
+  a.addAction("OK");
+  await a.present();
+  await QuickLook.present(report);
+}
+
 Script.complete();
