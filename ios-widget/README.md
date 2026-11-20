@@ -7,4 +7,4 @@ Ein Homescreen-Widget im Stil von islamsalzgitter.de/gebetszeiten. Es zeigt das 
 3. Homescreen lang drücken → **+** → *Scriptable* → Größe **Mittel** wählen (beide Karten) oder **Klein** (nur nächstes Gebet).
 4. Das Widget lang drücken → *Widget bearbeiten* → als Script **Gebetszeiten** wählen.
 
-Die Zeiten liest das Widget direkt von der Website. Ist die Seite nicht lesbar oder das Handy offline, rechnet es sie selbst aus (Salzgitter, mit Feinkorrektur in `CONFIG.offsets`).
+Die Zeiten kommen ausschließlich von der Website (keine eigene Berechnung). Sie werden einmal pro Tag geladen und zwischengespeichert. Optik: Liquid Glass – am besten mit dem Homescreen-Stil „Klar“.

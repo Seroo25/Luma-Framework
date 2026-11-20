@@ -1,28 +1,17 @@
 // Gebetszeiten-Widget für Scriptable (iOS)
-// Zeigt "Aktuelles Gebet" und "Nächstes Gebet" wie auf islamsalzgitter.de/gebetszeiten
+// Holt die Zeiten ausschließlich von islamsalzgitter.de/gebetszeiten
+// und zeigt "Aktuelles Gebet" + "Nächstes Gebet" im Liquid-Glass-Stil.
 //
 // Installation:
 //   1. App "Scriptable" aus dem App Store laden (kostenlos).
 //   2. Neues Script anlegen, diesen Code einfügen, "Gebetszeiten" nennen.
-//   3. Homescreen lang drücken → "+" → Scriptable → Widget "Mittel" (beide Karten)
+//   3. Homescreen lang drücken → "+" → Scriptable → Größe "Mittel" (beide Karten)
 //      oder "Klein" (nur nächstes Gebet) hinzufügen.
 //   4. Widget lang drücken → "Widget bearbeiten" → Script: "Gebetszeiten".
+//   Tipp: Mit dem Homescreen-Stil "Klar" (Liquid Glass) legt iOS das Glas
+//   automatisch hinter das Widget.
 
-// ───────────────────────── Einstellungen ─────────────────────────
-const CONFIG = {
-  // Zuerst wird versucht, die Zeiten direkt von der Moschee-Seite zu lesen.
-  sourceUrl: "https://www.islamsalzgitter.de/gebetszeiten/",
-
-  // Fallback: eigene Berechnung (falls die Seite nicht lesbar ist / offline).
-  latitude: 52.1508,   // Salzgitter
-  longitude: 10.3593,
-  fajrAngle: 18,
-  ishaAngle: 17,
-  asrFactor: 1,        // 1 = Standard (Schafi'i), 2 = Hanafi
-  // Feinkorrektur in Minuten, damit die Berechnung zur Moschee passt
-  // (abgeglichen mit Fr. 20.11.2026: Asr 14:08, Maghrib 16:23).
-  offsets: { fajr: 0, sunrise: 0, dhuhr: 0, asr: 9, maghrib: 3, isha: 0 },
-};
+const SOURCE_URL = "https://www.islamsalzgitter.de/gebetszeiten/";
 
 const NAMES = {
   fajr: "Fajr",
@@ -34,18 +23,18 @@ const NAMES = {
 };
 const ORDER = ["fajr", "sunrise", "dhuhr", "asr", "maghrib", "isha"];
 
-const COLORS = {
-  bg: new Color("#0b171c"),
-  card: new Color("#16262d"),
-  gradTop: new Color("#5aa8b8"),
-  gradBottom: new Color("#2f5f6b"),
-  label: new Color("#d6e9ee"),
-  accent: new Color("#5bb5c8"),
-  white: new Color("#f2fafc"),
-  muted: new Color("#8fb3bd"),
+// Liquid-Glass-Farben: weiß auf Glas, dezente Abstufungen
+const C = {
+  bgTop: new Color("#3a342e", 0.55),
+  bgBottom: new Color("#0e0d0c", 0.75),
+  cardHi: new Color("#ffffff", 0.2),
+  card: new Color("#ffffff", 0.08),
+  text: new Color("#ffffff", 1),
+  sub: new Color("#ffffff", 0.72),
+  faint: new Color("#ffffff", 0.5),
 };
 
-// ───────────────────────── Datenquelle 1: Website ─────────────────────────
+// ───────────────────────── Website auslesen ─────────────────────────
 const PATTERNS = {
   fajr: "(?:Fa[dg]?sch?r|Fajr|Fadjr|Sabah|Morgengebet)",
   sunrise: "(?:Sonnenaufgang|Shur[uû]q|Schuruk|Shuruk|G[üu]ne[sş])",
@@ -54,6 +43,7 @@ const PATTERNS = {
   maghrib: "(?:Maghrib|Magrib|Ak[sş]am|Abendgebet)",
   isha: "(?:\\^?\\s?[ʿ'`]?Isc?h[aâ]'?|Yats[ıi]|Nachtgebet)",
 };
+const KEY_BY_NAME = (name) => ORDER.find((k) => new RegExp("^" + PATTERNS[k] + "$", "i").test(name.trim()));
 
 function htmlToText(html) {
   return html
@@ -62,222 +52,203 @@ function htmlToText(html) {
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ");
+    .replace(/&#0?39;|&rsquo;/g, "'");
 }
 
-function parseSite(html) {
-  const text = htmlToText(html);
-  const result = {};
+const toMin = (h, m) => Number(h) * 60 + Number(m);
+
+function parse(text) {
+  text = text.replace(/\s+/g, " ");
+  const times = {};
   for (const key of ORDER) {
-    const re = new RegExp(PATTERNS[key] + "[^0-9]{0,60}?(\\d{1,2})[:.](\\d{2})", "i");
-    const m = text.match(re);
+    const m = text.match(new RegExp(PATTERNS[key] + "[^0-9]{0,60}?(\\d{1,2})[:.](\\d{2})", "i"));
     if (!m) return null;
-    result[key] = Number(m[1]) * 60 + Number(m[2]);
+    times[key] = toMin(m[1], m[2]);
   }
-  // Plausibilitätsprüfung: Zeiten müssen aufsteigend sein
   for (let i = 1; i < ORDER.length; i++) {
-    if (result[ORDER[i]] <= result[ORDER[i - 1]]) return null;
+    if (times[ORDER[i]] <= times[ORDER[i - 1]]) return null;
   }
-  return result;
+  // Karte "Nächstes Gebet" der Seite (liefert nach ^Ishâ das Fajr von morgen)
+  const n = text.match(/N[äa]chstes Gebet\s*(.{2,20}?)\s*(\d{1,2})[:.](\d{2})/i);
+  const next = n ? { key: KEY_BY_NAME(n[1]) || "fajr", min: toMin(n[2], n[3]) } : null;
+  return { times, next };
 }
 
-// ───────────────────────── Datenquelle 2: Berechnung ─────────────────────────
-const rad = (d) => (d * Math.PI) / 180;
-const deg = (r) => (r * 180) / Math.PI;
-
-function sunPos(jd) {
-  const D = jd - 2451545;
-  const g = (357.529 + 0.98560028 * D) % 360;
-  const q = (280.459 + 0.98564736 * D) % 360;
-  const L = (q + 1.915 * Math.sin(rad(g)) + 0.02 * Math.sin(rad(2 * g))) % 360;
-  const e = 23.439 - 0.00000036 * D;
-  const RA = deg(Math.atan2(Math.cos(rad(e)) * Math.sin(rad(L)), Math.cos(rad(L)))) / 15;
-  const decl = deg(Math.asin(Math.sin(rad(e)) * Math.sin(rad(L))));
-  let eq = q / 15 - (((RA % 24) + 24) % 24);
-  eq = ((((eq + 12) % 24) + 24) % 24) - 12;
-  return { decl, eq };
+// Variante 1: HTML direkt laden
+async function loadViaRequest() {
+  const req = new Request(SOURCE_URL);
+  req.timeoutInterval = 15;
+  return htmlToText(await req.loadString());
 }
 
-function calculate(date) {
-  const { latitude: lat, longitude: lng } = CONFIG;
-  const tz = -date.getTimezoneOffset() / 60;
-  const jd = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 864e5 + 2440587.5 - lng / 360;
-  const noon = (t) => 12 - sunPos(jd + t / 24).eq;
-  const atAngle = (angle, t, before) => {
-    const s = sunPos(jd + t / 24);
-    const v = deg(Math.acos(
-      (-Math.sin(rad(angle)) - Math.sin(rad(s.decl)) * Math.sin(rad(lat))) /
-      (Math.cos(rad(s.decl)) * Math.cos(rad(lat)))
-    )) / 15;
-    return noon(t) + (before ? -v : v);
-  };
-  const asrAngle = (t) => {
-    const s = sunPos(jd + t / 24);
-    return -deg(Math.atan(1 / (CONFIG.asrFactor + Math.tan(rad(Math.abs(lat - s.decl))))));
-  };
-  const local = (h) => h + tz - lng / 15;
-  const hours = {
-    fajr: local(atAngle(CONFIG.fajrAngle, 5, true)),
-    sunrise: local(atAngle(0.833, 6, true)),
-    dhuhr: local(noon(12)),
-    asr: local(atAngle(asrAngle(13), 13, false)),
-    maghrib: local(atAngle(0.833, 18, false)),
-    isha: local(atAngle(CONFIG.ishaAngle, 18, false)),
-  };
-  // Hohe Breiten (Sommer): Sonne erreicht den Winkel nicht → "Angle-Based"-Regel
-  const night = 24 - (hours.maghrib - hours.sunrise);
-  const maxFajr = (CONFIG.fajrAngle / 60) * night;
-  const maxIsha = (CONFIG.ishaAngle / 60) * night;
-  if (isNaN(hours.fajr) || hours.sunrise - hours.fajr > maxFajr) hours.fajr = hours.sunrise - maxFajr;
-  if (isNaN(hours.isha) || hours.isha - hours.maghrib > maxIsha) hours.isha = hours.maghrib + maxIsha;
-  const res = {};
-  for (const k of ORDER) res[k] = Math.round(hours[k] * 60) + (CONFIG.offsets[k] || 0);
-  return res;
+// Variante 2: Seite im unsichtbaren Browser rendern (falls Zeiten per JavaScript kommen)
+async function loadViaWebView() {
+  const wv = new WebView();
+  await wv.loadURL(SOURCE_URL);
+  return await wv.evaluateJavaScript(`
+    (function wait(n){
+      const t = document.body ? document.body.innerText : "";
+      if (/\\d{1,2}:\\d{2}/.test(t) || n <= 0) { completion(t); }
+      else { setTimeout(() => wait(n - 1), 500); }
+    })(16);
+  `, true);
 }
 
-// ───────────────────────── Cache & Laden ─────────────────────────
+// ───────────────────────── Cache (letzte erfolgreiche Abfrage) ─────────────────────────
 const fm = FileManager.local();
 const cachePath = fm.joinPath(fm.documentsDirectory(), "gebetszeiten-cache.json");
 const dayKey = (d) => `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 
 function readCache() {
-  try { return fm.fileExists(cachePath) ? JSON.parse(fm.readString(cachePath)) : {}; }
-  catch (e) { return {}; }
+  try { return fm.fileExists(cachePath) ? JSON.parse(fm.readString(cachePath)) : null; }
+  catch (e) { return null; }
 }
 
-async function timesForToday(now) {
-  const key = dayKey(now);
+let lastRawText = "";
+
+async function fetchData(now) {
   const cache = readCache();
-  if (cache[key]) return cache[key];
-  try {
-    const req = new Request(CONFIG.sourceUrl);
-    req.timeoutInterval = 10;
-    const parsed = parseSite(await req.loadString());
-    if (parsed) {
-      fm.writeString(cachePath, JSON.stringify({ [key]: parsed }));
-      return parsed;
-    }
-  } catch (e) { /* offline → Berechnung */ }
-  return calculate(now);
+  const needsNext = cache && cache.day === dayKey(now) && now.getHours() * 60 + now.getMinutes() >= cache.data.times.isha;
+  if (cache && cache.day === dayKey(now) && !needsNext) return cache.data;
+
+  for (const loader of [loadViaRequest, loadViaWebView]) {
+    try {
+      lastRawText = await loader();
+      const data = parse(lastRawText);
+      if (data) {
+        fm.writeString(cachePath, JSON.stringify({ day: dayKey(now), data }));
+        return data;
+      }
+    } catch (e) { /* nächste Variante */ }
+  }
+  return cache && cache.day === dayKey(now) ? cache.data : null;
 }
 
-function toDate(base, minutes, dayShift = 0) {
+// ───────────────────────── Aktuelles / nächstes Gebet ─────────────────────────
+function at(base, minutes, dayShift = 0) {
   const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + dayShift);
   d.setMinutes(minutes);
   return d;
 }
 
-async function getState() {
-  const now = new Date();
-  const today = await timesForToday(now);
-  const list = ORDER.map((k) => ({ key: k, date: toDate(now, today[k]) }));
-
+function getState(data, now) {
+  const list = ORDER.map((k) => ({ key: k, date: at(now, data.times[k]) }));
   let idx = -1;
   for (let i = 0; i < list.length; i++) if (list[i].date <= now) idx = i;
 
-  let current, next;
   if (idx === -1) {
-    // nach Mitternacht, vor Fajr → ^Ishâ von gestern läuft noch
-    const y = calculate(new Date(now.getTime() - 864e5));
-    current = { key: "isha", date: toDate(now, y.isha, -1) };
-    next = list[0];
-  } else if (idx === list.length - 1) {
-    current = list[idx];
-    const tomorrow = calculate(new Date(now.getTime() + 864e5));
-    next = { key: "fajr", date: toDate(now, tomorrow.fajr, 1) };
-  } else {
-    current = list[idx];
-    next = list[idx + 1];
+    // nach Mitternacht vor Fajr: ^Ishâ läuft noch
+    return { current: { key: "isha", date: at(now, data.times.isha, -1) }, next: list[0] };
   }
-  return { current, next };
+  if (idx === list.length - 1) {
+    // nach ^Ishâ: Fajr von morgen aus der "Nächstes Gebet"-Karte der Seite
+    const fajr = data.next && data.next.key === "fajr" && data.next.min < data.times.dhuhr ? data.next.min : data.times.fajr;
+    return { current: list[idx], next: { key: "fajr", date: at(now, fajr, 1) } };
+  }
+  return { current: list[idx], next: list[idx + 1] };
 }
 
-// ───────────────────────── Widget-Layout ─────────────────────────
-const fmt = (d) => {
+// ───────────────────────── Layout ─────────────────────────
+const hhmm = (d) => {
   const df = new DateFormatter();
   df.dateFormat = "HH:mm";
   return df.string(d);
 };
 
-function addCard(parent, opts) {
+function baseWidget() {
+  const w = new ListWidget();
+  const g = new LinearGradient();
+  g.colors = [C.bgTop, C.bgBottom];
+  g.locations = [0, 1];
+  g.startPoint = new Point(0, 0);
+  g.endPoint = new Point(1, 1);
+  w.backgroundGradient = g;
+  w.setPadding(10, 10, 10, 10);
+  w.url = SOURCE_URL;
+  return w;
+}
+
+function addText(stack, str, font, color) {
+  const t = stack.addText(str);
+  t.font = font;
+  t.textColor = color;
+  t.lineLimit = 1;
+  t.minimumScaleFactor = 0.6;
+  return t;
+}
+
+function addCard(parent, { label, item, endsAt, highlight }) {
   const card = parent.addStack();
   card.layoutVertically();
-  card.cornerRadius = 18;
-  card.setPadding(12, 12, 12, 12);
-  if (opts.highlight) {
-    const g = new LinearGradient();
-    g.colors = [COLORS.gradTop, COLORS.gradBottom];
-    g.locations = [0, 1];
-    g.startPoint = new Point(0, 0);
-    g.endPoint = new Point(1, 1);
-    card.backgroundGradient = g;
-  } else {
-    card.backgroundColor = COLORS.card;
-  }
+  card.cornerRadius = 20;
+  card.setPadding(11, 12, 11, 12);
+  card.backgroundColor = highlight ? C.cardHi : C.card;
 
-  const label = card.addText(opts.label);
-  label.font = Font.semiboldSystemFont(10);
-  label.textColor = opts.highlight ? COLORS.label : COLORS.accent;
-
-  card.addSpacer(4);
-  const name = card.addText(NAMES[opts.item.key]);
-  name.font = Font.boldSystemFont(17);
-  name.textColor = opts.highlight ? COLORS.white : COLORS.accent;
-  name.lineLimit = 1;
-
-  const time = card.addText(fmt(opts.item.date));
-  time.font = Font.heavySystemFont(32);
-  time.textColor = COLORS.white;
-  time.minimumScaleFactor = 0.7;
-
+  addText(card, label, Font.semiboldSystemFont(9), C.faint);
+  card.addSpacer(3);
+  addText(card, NAMES[item.key], Font.semiboldRoundedSystemFont(16), C.text);
+  addText(card, hhmm(item.date), Font.boldRoundedSystemFont(34), C.text);
   card.addSpacer();
+
   const footer = card.addStack();
   footer.centerAlignContent();
-  if (opts.endsAt) {
-    const t = footer.addText(`Endet · ${fmt(opts.endsAt)} Uhr`);
-    t.font = Font.mediumSystemFont(11);
-    t.textColor = COLORS.label;
+  if (endsAt) {
+    addText(footer, `Endet · ${hhmm(endsAt)} Uhr`, Font.mediumSystemFont(11), C.sub);
   } else {
-    const t = footer.addText("in ");
-    t.font = Font.mediumSystemFont(11);
-    t.textColor = COLORS.muted;
-    const rel = footer.addDate(opts.item.date);
-    rel.applyTimerStyle();
-    rel.font = Font.mediumSystemFont(11);
-    rel.textColor = COLORS.muted;
+    addText(footer, "in ", Font.mediumSystemFont(11), C.sub);
+    const d = footer.addDate(item.date);
+    d.applyTimerStyle();
+    d.font = Font.mediumSystemFont(11);
+    d.textColor = C.sub;
   }
   footer.addSpacer();
   return card;
 }
 
+function errorWidget() {
+  const w = baseWidget();
+  w.addSpacer();
+  const t = addText(w, "Gebetszeiten", Font.semiboldRoundedSystemFont(15), C.text);
+  t.centerAlignText();
+  w.addSpacer(4);
+  const s = w.addText("Seite gerade nicht erreichbar");
+  s.font = Font.mediumSystemFont(11);
+  s.textColor = C.sub;
+  s.centerAlignText();
+  w.addSpacer();
+  w.refreshAfterDate = new Date(Date.now() + 15 * 60 * 1000);
+  return w;
+}
+
 async function buildWidget() {
-  const { current, next } = await getState();
-  const family = config.widgetFamily || "medium";
+  const now = new Date();
+  const data = await fetchData(now);
+  if (!data) return errorWidget();
 
-  const w = new ListWidget();
-  w.backgroundColor = COLORS.bg;
-  w.setPadding(10, 10, 10, 10);
-  w.url = CONFIG.sourceUrl;
+  const { current, next } = getState(data, now);
+  const w = baseWidget();
 
-  if (family === "small") {
+  if (config.widgetFamily === "small") {
     addCard(w, { label: "NÄCHSTES GEBET", item: next });
   } else {
     const row = w.addStack();
     row.layoutHorizontally();
     addCard(row, { label: "AKTUELLES GEBET", item: current, endsAt: next.date, highlight: true });
-    row.addSpacer(10);
+    row.addSpacer(8);
     addCard(row, { label: "NÄCHSTES GEBET", item: next });
   }
 
-  // Direkt nach dem nächsten Gebetswechsel neu laden
   w.refreshAfterDate = new Date(next.date.getTime() + 30 * 1000);
   return w;
 }
 
+// ───────────────────────── Start ─────────────────────────
 const widget = await buildWidget();
 if (config.runsInWidget) {
   Script.setWidget(widget);
 } else {
   await widget.presentMedium();
+  // Hilfe zur Fehlersuche: Wenn nichts gelesen werden konnte, Seitentext anzeigen
+  if (!readCache() && lastRawText) await QuickLook.present(lastRawText.replace(/\s+/g, " ").slice(0, 4000));
 }
 Script.complete();
