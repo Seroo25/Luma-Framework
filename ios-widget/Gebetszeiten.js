@@ -10,6 +10,9 @@
 //      Mittel = Datum + aktuelles & nächstes Gebet
 //      Groß   = Datum + beide Karten + alle Gebetszeiten des Tages
 //   4. Widget lang drücken → "Widget bearbeiten" → Script: "Gebetszeiten".
+//   Automatisch um Mitternacht aktualisieren (iOS lädt Widgets sonst oft verspätet):
+//   Kurzbefehle → Automation → "+" → Tageszeit 00:01, täglich, "Sofort ausführen"
+//   → Aktion "Script ausführen" (Scriptable) → Script "Gebetszeiten", "In App ausführen" AUS.
 //   Durchsichtiges Glas: Homescreen lang drücken → "Bearbeiten" → "Anpassen"
 //   → Stil "Klar". Dann legt iOS echtes Liquid Glass hinter das Widget und
 //   passt es automatisch an den Hintergrund an (wie bei den App-Symbolen).
@@ -338,6 +341,11 @@ async function buildWidget(family) {
 // ───────────────────────── Start ─────────────────────────
 if (config.runsInWidget) {
   Script.setWidget(await buildWidget(config.widgetFamily));
+} else if (config.runsWithSiri) {
+  // Aufruf aus der Kurzbefehle-Automation: nur Daten laden, keine Vorschau.
+  // Scriptable lädt danach die Widgets neu (Datum/Gebet springt um).
+  await loadData();
+  Script.setShortcutOutput("Gebetszeiten aktualisiert");
 } else {
   // Vorschau in der App: Größe auswählen
   const a = new Alert();
