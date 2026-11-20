@@ -14,6 +14,10 @@
 //               Zwei kleine Widgets nebeneinander = die zwei Kacheln wie auf der Website.
 //      Mittel = Datum + aktuelles & nächstes Gebet
 //      Groß   = Datum + beide Karten + alle Gebetszeiten des Tages
+//      Sperrbildschirm: Sperrbildschirm lang drücken → "Anpassen" → Sperrbildschirm
+//               → Widget-Feld antippen → Scriptable → "rechteckig" (aktuelles + nächstes
+//               Gebet mit Countdown) oder "rund" (nächstes Gebet); über der Uhr = eine Zeile.
+//               Danach das Widget antippen und als Script "Gebetszeiten" wählen.
 //   4. Widget lang drücken → "Widget bearbeiten" → Script: "Gebetszeiten".
 //   Durchsichtiges Glas: Homescreen lang drücken → "Bearbeiten" → "Anpassen"
 //   → Stil "Klar". Dann legt iOS echtes Liquid Glass hinter das Widget und
@@ -324,10 +328,58 @@ function tileWidget(now, current, next) {
   return w;
 }
 
+// ───────────────────────── Sperrbildschirm ─────────────────────────
+// iOS färbt Sperrbildschirm-Widgets selbst ein, daher nur Schrift (keine Farben/Kacheln).
+function accessoryWidget(family, data, now) {
+  const w = new ListWidget();
+  w.url = SOURCE_URL;
+  if (!data) {
+    w.addText("Gebetszeiten –");
+    return w;
+  }
+  const { current, next } = getState(data, now);
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 30);
+  w.refreshAfterDate = new Date(Math.min(next.date.getTime() + 30 * 1000, midnight.getTime()));
+
+  if (family === "accessoryInline") {
+    // Zeile über der Uhr: "^Ishâ 18:05"
+    w.addText(`${NAMES[next.key]} ${hhmm(next.date)}`);
+    return w;
+  }
+
+  if (family === "accessoryCircular") {
+    w.addAccessoryWidgetBackground = true;
+    w.setPadding(0, 0, 0, 0);
+    const col = w.addStack();
+    col.layoutVertically();
+    const r1 = col.addStack(); r1.addSpacer();
+    addText(r1, NAMES[next.key], Font.semiboldRoundedSystemFont(11), C.sub, 0.5); r1.addSpacer();
+    const r2 = col.addStack(); r2.addSpacer();
+    addText(r2, hhmm(next.date), Font.boldRoundedSystemFont(16), C.text, 0.5); r2.addSpacer();
+    return w;
+  }
+
+  // accessoryRectangular (breit, 2 Felder)
+  w.setPadding(0, 0, 0, 0);
+  addText(w, `${NAMES[current.key]} · endet ${hhmm(next.date)}`, Font.mediumSystemFont(12), C.sub, 0.7);
+  addText(w, `${NAMES[next.key]}  ${hhmm(next.date)}`, Font.boldRoundedSystemFont(19), C.text, 0.7);
+  const r = w.addStack();
+  const pre = r.addText("in ");
+  pre.font = Font.mediumSystemFont(12);
+  pre.textColor = C.sub;
+  const d = r.addDate(next.date);
+  d.applyRelativeStyle();
+  d.font = Font.mediumSystemFont(12);
+  d.textColor = C.sub;
+  d.lineLimit = 1;
+  return w;
+}
+
 async function buildWidget(family) {
   const S = SIZES[family] || SIZES.medium;
   const now = new Date();
   const data = await loadData();
+  if (String(family).startsWith("accessory")) return accessoryWidget(family, data, now);
   if (!data) return errorWidget(S);
 
   const { current, next } = getState(data, now);
@@ -365,7 +417,7 @@ if (config.runsInWidget) {
   // Vorschau in der App: Größe auswählen
   const a = new Alert();
   a.title = "Vorschau";
-  ["Klein", "Mittel", "Groß", "Klein · aktuell", "Klein · datum"].forEach((t) => a.addAction(t));
+  ["Klein", "Mittel", "Groß", "Klein · aktuell", "Klein · datum", "Sperrbildschirm · rechteckig", "Sperrbildschirm · rund", "Sperrbildschirm · Zeile"].forEach((t) => a.addAction(t));
   a.addCancelAction("Abbrechen");
   const i = await a.presentSheet();
   if (i === 0) await (await buildWidget("small")).presentSmall();
@@ -373,5 +425,8 @@ if (config.runsInWidget) {
   if (i === 2) await (await buildWidget("large")).presentLarge();
   if (i === 3) { PARAM_OVERRIDE = "aktuell"; await (await buildWidget("small")).presentSmall(); }
   if (i === 4) { PARAM_OVERRIDE = "datum"; await (await buildWidget("small")).presentSmall(); }
+  if (i === 5) await (await buildWidget("accessoryRectangular")).presentAccessoryRectangular();
+  if (i === 6) await (await buildWidget("accessoryCircular")).presentAccessoryCircular();
+  if (i === 7) await (await buildWidget("accessoryInline")).presentAccessoryInline();
 }
 Script.complete();
