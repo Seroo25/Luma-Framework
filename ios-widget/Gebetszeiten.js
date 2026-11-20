@@ -30,6 +30,9 @@ const ORDER = ["fajr", "sunrise", "dhuhr", "asr", "maghrib", "isha"];
 // Islamisches Datum: ±1 Tag Korrektur, falls die Moschee abweicht
 const HIJRI_OFFSET = 0;
 
+// Datumszeile oben anzeigen? (false = nur die Kacheln, sie füllen dann das ganze Widget)
+const SHOW_HEADER = true;
+
 // Liquid Glass: nur Weiß in verschiedenen Deckkräften.
 // Im Homescreen-Stil "Klar" ersetzt iOS den Hintergrund durch echtes Glas.
 const C = {
@@ -167,8 +170,8 @@ const hhmm = (d) => dateText(d, "HH:mm");
 
 // Schriftgrößen je Widget-Größe
 const SIZES = {
-  small:  { pad: 12, date: 12, hijri: 9,  label: 8, name: 13, time: 26, foot: 10, cardPad: 9,  radius: 16, gap: 6 },
-  medium: { pad: 12, date: 14, hijri: 10, label: 8, name: 14, time: 24, foot: 10, cardPad: 9,  radius: 18, gap: 8 },
+  small:  { pad: 7, date: 12, hijri: 9,  label: 8, name: 13, time: 26, foot: 10, cardPad: 10, radius: 16, gap: 5 },
+  medium: { pad: 7, date: 14, hijri: 10, label: 8, name: 14, time: 26, foot: 10, cardPad: 10, radius: 16, gap: 6 },
   large:  { pad: 16, date: 18, hijri: 12, label: 9, name: 17, time: 34, foot: 11, cardPad: 12, radius: 22, gap: 10 },
 };
 
@@ -216,7 +219,7 @@ function addCard(parent, S, { label, item, endsAt, highlight }) {
   card.addSpacer(2);
   addText(card, NAMES[item.key], Font.semiboldRoundedSystemFont(S.name), C.text);
   addText(card, hhmm(item.date), Font.boldRoundedSystemFont(S.time), C.text);
-  card.addSpacer(2);
+  card.addSpacer(); // Kachel wächst nach unten bis zum Rand
 
   const footer = card.addStack();
   footer.centerAlignContent();
@@ -279,8 +282,11 @@ async function buildWidget(family) {
   const { current, next } = getState(data, now);
   const w = baseWidget(S);
 
-  addHeader(w, S, now, family);
-  w.addSpacer(S.gap);
+  if (SHOW_HEADER) {
+    if (family !== "large") w.addSpacer(3);
+    addHeader(w, S, now, family);
+    w.addSpacer(S.gap);
+  }
 
   if (family === "small") {
     addCard(w, S, { label: "NÄCHSTES GEBET", item: next });
@@ -295,7 +301,6 @@ async function buildWidget(family) {
       addDayList(w, S, data, now, current);
     }
   }
-  w.addSpacer();
 
   // Nach dem nächsten Gebet bzw. um Mitternacht (neues Datum) neu laden
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 30);
