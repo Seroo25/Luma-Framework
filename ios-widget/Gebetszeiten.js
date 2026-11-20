@@ -6,7 +6,12 @@
 //   1. App "Scriptable" aus dem App Store laden (kostenlos).
 //   2. Neues Script anlegen, diesen Code einfügen, "Gebetszeiten" nennen.
 //   3. Homescreen lang drücken → "+" → Scriptable → Größe wählen:
-//      Klein  = Datum + nächstes Gebet
+//      Klein  = eine einzelne Kachel (Widget IST die Kachel, kein Rahmen drumherum).
+//               Welche Kachel, legst du unter "Widget bearbeiten" → "Parameter" fest:
+//               aktuell  → Aktuelles Gebet
+//               nächstes → Nächstes Gebet (Standard, wenn leer)
+//               datum    → Datum + islamisches Datum
+//               Zwei kleine Widgets nebeneinander = die zwei Kacheln wie auf der Website.
 //      Mittel = Datum + aktuelles & nächstes Gebet
 //      Groß   = Datum + beide Karten + alle Gebetszeiten des Tages
 //   4. Widget lang drücken → "Widget bearbeiten" → Script: "Gebetszeiten".
@@ -272,6 +277,48 @@ function errorWidget(S) {
   return w;
 }
 
+let PARAM_OVERRIDE = null; // nur für die Vorschau in der App
+
+// Kleines Widget = genau eine Kachel, randlos
+function tileWidget(now, current, next) {
+  const p = String(PARAM_OVERRIDE || args.widgetParameter || "").toLowerCase().trim();
+  const mode = p.startsWith("akt") ? "current" : p.startsWith("dat") ? "date" : "next";
+  const w = new ListWidget();
+  w.backgroundColor = mode === "current" ? C.cardHi : C.card;
+  w.setPadding(16, 16, 16, 16);
+  w.url = SOURCE_URL;
+
+  if (mode === "date") {
+    addText(w, dateText(now, "EEEE").toUpperCase(), Font.semiboldSystemFont(11), C.sub);
+    w.addSpacer();
+    addText(w, dateText(now, "d"), Font.boldRoundedSystemFont(46), C.text);
+    addText(w, dateText(now, "MMMM yyyy"), Font.semiboldRoundedSystemFont(15), C.text);
+    w.addSpacer(4);
+    const h = hijriParts(now);
+    addText(w, `${h.day}. ${HIJRI_MONTHS[h.month - 1]} ${h.year}`, Font.mediumSystemFont(11), C.sub, 0.5);
+  } else {
+    const item = mode === "current" ? current : next;
+    addText(w, mode === "current" ? "AKTUELLES GEBET" : "NÄCHSTES GEBET", Font.semiboldSystemFont(11), C.sub);
+    w.addSpacer();
+    addText(w, NAMES[item.key], Font.semiboldRoundedSystemFont(20), C.text);
+    addText(w, hhmm(item.date), Font.boldRoundedSystemFont(44), C.text);
+    w.addSpacer(2);
+    if (mode === "current") {
+      addText(w, `Endet · ${hhmm(next.date)} Uhr`, Font.mediumSystemFont(13), C.sub);
+    } else {
+      const d = w.addDate(item.date);
+      d.applyRelativeStyle();
+      d.font = Font.mediumSystemFont(13);
+      d.textColor = C.sub;
+      d.lineLimit = 1;
+      d.minimumScaleFactor = 0.6;
+    }
+  }
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 30);
+  w.refreshAfterDate = new Date(Math.min(next.date.getTime() + 30 * 1000, midnight.getTime()));
+  return w;
+}
+
 async function buildWidget(family) {
   const S = SIZES[family] || SIZES.medium;
   const now = new Date();
@@ -287,7 +334,7 @@ async function buildWidget(family) {
   }
 
   if (family === "small") {
-    addCard(w, S, { label: "NÄCHSTES GEBET", item: next });
+    return tileWidget(now, current, next);
   } else {
     const row = w.addStack();
     row.layoutHorizontally();
@@ -313,11 +360,13 @@ if (config.runsInWidget) {
   // Vorschau in der App: Größe auswählen
   const a = new Alert();
   a.title = "Vorschau";
-  ["Klein", "Mittel", "Groß"].forEach((t) => a.addAction(t));
+  ["Klein", "Mittel", "Groß", "Klein · aktuell", "Klein · datum"].forEach((t) => a.addAction(t));
   a.addCancelAction("Abbrechen");
   const i = await a.presentSheet();
   if (i === 0) await (await buildWidget("small")).presentSmall();
   if (i === 1) await (await buildWidget("medium")).presentMedium();
   if (i === 2) await (await buildWidget("large")).presentLarge();
+  if (i === 3) { PARAM_OVERRIDE = "aktuell"; await (await buildWidget("small")).presentSmall(); }
+  if (i === 4) { PARAM_OVERRIDE = "datum"; await (await buildWidget("small")).presentSmall(); }
 }
 Script.complete();
