@@ -1,5 +1,5 @@
 // Gebetszeiten-Widget für Scriptable (iOS)
-// Holt die Zeiten ausschließlich von islamsalzgitter.de/gebetszeiten
+// Holt die Zeiten ausschließlich von islamsalzgitter.de (Gebetszeiten-App der Moschee)
 // und zeigt "Aktuelles Gebet" + "Nächstes Gebet" im Liquid-Glass-Stil.
 //
 // Installation:
@@ -34,94 +34,64 @@ const C = {
   faint: new Color("#ffffff", 0.5),
 };
 
-// ───────────────────────── Website auslesen ─────────────────────────
-const PATTERNS = {
-  fajr: "(?:Fa[dg]?sch?r|Fajr|Fadjr|Sabah|Morgengebet)",
-  sunrise: "(?:Sonnenaufgang|Shur[uû]q|Schuruk|Shuruk|G[üu]ne[sş])",
-  dhuhr: "(?:Dhuhr|Zuhr|Zohr|Duhr|[ÖO][gğ]le|Mittagsgebet)",
-  asr: "(?:\\^?\\s?[ʿ'`]?Asr|[İI]kindi|Nachmittagsgebet)",
-  maghrib: "(?:Maghrib|Magrib|Ak[sş]am|Abendgebet)",
-  isha: "(?:\\^?\\s?[ʿ'`]?Isc?h[aâ]'?|Yats[ıi]|Nachtgebet)",
-};
-const KEY_BY_NAME = (name) => ORDER.find((k) => new RegExp("^" + PATTERNS[k] + "$", "i").test(name.trim()));
+// ───────────────────────── Daten von der Moschee ─────────────────────────
+// Die Gebetszeiten-App der Seite lädt ihre Zeiten von hier:
+const DATA_URL = "https://www.islamsalzgitter.de/wp-admin/admin-ajax.php?action=ptcms_load";
+// Format: base["MM-DD"] = [Fajr, Shurûq, Dhuhr, ^Asr, Maghrib, ^Ishâ] in Minuten ab 00:00
 
-function htmlToText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&#0?39;|&rsquo;/g, "'");
-}
-
-const toMin = (h, m) => Number(h) * 60 + Number(m);
-
-function parse(text) {
-  text = text.replace(/\s+/g, " ");
-  const times = {};
-  for (const key of ORDER) {
-    const m = text.match(new RegExp(PATTERNS[key] + "[^0-9]{0,60}?(\\d{1,2})[:.](\\d{2})", "i"));
-    if (!m) return null;
-    times[key] = toMin(m[1], m[2]);
-  }
-  for (let i = 1; i < ORDER.length; i++) {
-    if (times[ORDER[i]] <= times[ORDER[i - 1]]) return null;
-  }
-  // Karte "Nächstes Gebet" der Seite (liefert nach ^Ishâ das Fajr von morgen)
-  const n = text.match(/N[äa]chstes Gebet\s*(.{2,20}?)\s*(\d{1,2})[:.](\d{2})/i);
-  const next = n ? { key: KEY_BY_NAME(n[1]) || "fajr", min: toMin(n[2], n[3]) } : null;
-  return { times, next };
-}
-
-// Variante 1: HTML direkt laden
-async function loadViaRequest() {
-  const req = new Request(SOURCE_URL);
-  req.timeoutInterval = 15;
-  return htmlToText(await req.loadString());
-}
-
-// Variante 2: Seite im unsichtbaren Browser rendern (falls Zeiten per JavaScript kommen)
-async function loadViaWebView() {
-  const wv = new WebView();
-  await wv.loadURL(SOURCE_URL);
-  return await wv.evaluateJavaScript(`
-    (function wait(n){
-      const t = document.body ? document.body.innerText : "";
-      if (/\\d{1,2}:\\d{2}/.test(t) || n <= 0) { completion(t); }
-      else { setTimeout(() => wait(n - 1), 500); }
-    })(16);
-  `, true);
-}
-
-// ───────────────────────── Cache (letzte erfolgreiche Abfrage) ─────────────────────────
 const fm = FileManager.local();
-const cachePath = fm.joinPath(fm.documentsDirectory(), "gebetszeiten-cache.json");
-const dayKey = (d) => `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+const cachePath = fm.joinPath(fm.documentsDirectory(), "gebetszeiten-asz.json");
+const MAX_AGE = 24 * 60 * 60 * 1000; // einmal täglich neu laden
 
 function readCache() {
   try { return fm.fileExists(cachePath) ? JSON.parse(fm.readString(cachePath)) : null; }
   catch (e) { return null; }
 }
 
-let lastRawText = "";
-
-async function fetchData(now) {
+async function loadData() {
   const cache = readCache();
-  const needsNext = cache && cache.day === dayKey(now) && now.getHours() * 60 + now.getMinutes() >= cache.data.times.isha;
-  if (cache && cache.day === dayKey(now) && !needsNext) return cache.data;
+  if (cache && Date.now() - cache.savedAt < MAX_AGE) return cache.data;
+  try {
+    const req = new Request(DATA_URL);
+    req.timeoutInterval = 20;
+    const j = await req.loadJSON();
+    if (j && j.success && j.data && j.data.base) {
+      fm.writeString(cachePath, JSON.stringify({ savedAt: Date.now(), data: j.data }));
+      return j.data;
+    }
+  } catch (e) { /* offline → letzter Stand */ }
+  return cache ? cache.data : null; // ganzes Jahr ist zwischengespeichert
+}
 
-  for (const loader of [loadViaRequest, loadViaWebView]) {
-    try {
-      lastRawText = await loader();
-      const data = parse(lastRawText);
-      if (data) {
-        fm.writeString(cachePath, JSON.stringify({ day: dayKey(now), data }));
-        return data;
-      }
-    } catch (e) { /* nächste Variante */ }
+const pad = (n) => String(n).padStart(2, "0");
+const isDay = (k) => /^\d{4}-\d{2}-\d{2}$/.test(k);
+const valid = (v) => Array.isArray(v) && v.length >= 6 && v.slice(0, 6).every((x) => typeof x === "number");
+
+// Falls die App Sonderzeiten für einzelne Tage (JJJJ-MM-TT) speichert, haben die Vorrang
+function overrideFor(data, d) {
+  const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  for (const v of Object.values(data)) {
+    if (v && typeof v === "object" && !Array.isArray(v) && valid(v[key]) && Object.keys(v).some(isDay)) return v[key];
   }
-  return cache && cache.day === dayKey(now) ? cache.data : null;
+  return null;
+}
+
+// Sommerzeit: Enthalten die Tabellenwerte sie nicht schon, wird +60 Min. gerechnet
+function dstShift(data, d) {
+  const b = data.base;
+  const tableHasDst = b["07-01"] && b["01-01"] && b["07-01"][2] - b["01-01"][2] > 30;
+  if (tableHasDst) return 0;
+  const jan = new Date(d.getFullYear(), 0, 1).getTimezoneOffset();
+  return d.getTimezoneOffset() < jan ? 60 : 0;
+}
+
+function timesFor(data, d) {
+  const ov = overrideFor(data, d);
+  if (ov) return ov.slice(0, 6);
+  let v = data.base[`${pad(d.getMonth() + 1)}-${pad(d.getDate())}`];
+  if (!valid(v)) v = data.base["02-28"]; // 29. Februar ohne Eintrag
+  const shift = dstShift(data, d);
+  return v.slice(0, 6).map((x) => x + shift);
 }
 
 // ───────────────────────── Aktuelles / nächstes Gebet ─────────────────────────
@@ -132,18 +102,18 @@ function at(base, minutes, dayShift = 0) {
 }
 
 function getState(data, now) {
-  const list = ORDER.map((k) => ({ key: k, date: at(now, data.times[k]) }));
+  const dayOffset = (n) => new Date(now.getFullYear(), now.getMonth(), now.getDate() + n, 12);
+  const today = timesFor(data, now);
+  const list = ORDER.map((k, i) => ({ key: k, date: at(now, today[i]) }));
   let idx = -1;
   for (let i = 0; i < list.length; i++) if (list[i].date <= now) idx = i;
 
   if (idx === -1) {
-    // nach Mitternacht vor Fajr: ^Ishâ läuft noch
-    return { current: { key: "isha", date: at(now, data.times.isha, -1) }, next: list[0] };
+    // nach Mitternacht vor Fajr: ^Ishâ von gestern läuft noch
+    return { current: { key: "isha", date: at(now, timesFor(data, dayOffset(-1))[5], -1) }, next: list[0] };
   }
   if (idx === list.length - 1) {
-    // nach ^Ishâ: Fajr von morgen aus der "Nächstes Gebet"-Karte der Seite
-    const fajr = data.next && data.next.key === "fajr" && data.next.min < data.times.dhuhr ? data.next.min : data.times.fajr;
-    return { current: list[idx], next: { key: "fajr", date: at(now, fajr, 1) } };
+    return { current: list[idx], next: { key: "fajr", date: at(now, timesFor(data, dayOffset(1))[0], 1) } };
   }
   return { current: list[idx], next: list[idx + 1] };
 }
@@ -222,7 +192,7 @@ function errorWidget() {
 
 async function buildWidget() {
   const now = new Date();
-  const data = await fetchData(now);
+  const data = await loadData();
   if (!data) return errorWidget();
 
   const { current, next } = getState(data, now);
@@ -247,49 +217,6 @@ const widget = await buildWidget();
 if (config.runsInWidget) {
   Script.setWidget(widget);
 } else {
-  // Hilfe zur Fehlersuche: Wenn nichts gelesen werden konnte, Diagnose erstellen
-  if (!readCache()) await diagnose();
   await widget.presentMedium();
 }
-
-// Fehlersuche: sammelt, was das Script auf der Seite sieht, und kopiert es in die Zwischenablage
-async function diagnose() {
-  const out = [];
-  const around = (t, word) => {
-    const i = t.search(new RegExp(word, "i"));
-    return i < 0 ? "(nicht gefunden)" : t.slice(Math.max(0, i - 300), i + 500);
-  };
-  try {
-    const req = new Request(SOURCE_URL);
-    req.timeoutInterval = 20;
-    const html = await req.loadString();
-    out.push(`REQUEST: Status ${req.response.statusCode}, ${html.length} Zeichen`);
-    const srcs = [...html.matchAll(/<(?:script|iframe)[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]);
-    out.push("SCRIPTS/IFRAMES:\n" + srcs.join("\n"));
-    const urls = [...new Set([...html.matchAll(/https?:[^"'\s<>)]+/g)].map((m) => m[0]))]
-      .filter((u) => /api|json|ajax|prayer|gebet|salah|times|mawaqit|wp-json|admin-ajax/i.test(u));
-    out.push("INTERESSANTE URLS:\n" + urls.join("\n"));
-    out.push("HTML BEI 'Maghrib':\n" + around(html, "Maghrib"));
-    out.push("TEXT BEI 'Maghrib':\n" + around(htmlToText(html).replace(/\s+/g, " "), "Maghrib"));
-  } catch (e) {
-    out.push("REQUEST FEHLER: " + e);
-  }
-  try {
-    const t = await loadViaWebView();
-    out.push(`WEBVIEW: ${t.length} Zeichen`);
-    out.push("WEBVIEW BEI 'Maghrib':\n" + around(t.replace(/\s+/g, " "), "Maghrib"));
-    out.push("WEBVIEW ANFANG:\n" + t.replace(/\s+/g, " ").slice(0, 1500));
-  } catch (e) {
-    out.push("WEBVIEW FEHLER: " + e);
-  }
-  const report = out.join("\n\n────────\n\n");
-  Pasteboard.copy(report);
-  const a = new Alert();
-  a.title = "Diagnose kopiert";
-  a.message = "Der Bericht ist in der Zwischenablage. Füge ihn im Chat ein (Einsetzen).";
-  a.addAction("OK");
-  await a.present();
-  await QuickLook.present(report);
-}
-
 Script.complete();
