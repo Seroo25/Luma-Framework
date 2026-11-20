@@ -170,8 +170,8 @@ const hhmm = (d) => dateText(d, "HH:mm");
 
 // Schriftgrößen je Widget-Größe
 const SIZES = {
-  small:  { pad: 7, date: 12, hijri: 9,  label: 8, name: 13, time: 26, foot: 10, cardPad: 10, radius: 16, gap: 5 },
-  medium: { pad: 7, date: 14, hijri: 10, label: 8, name: 14, time: 26, foot: 10, cardPad: 10, radius: 16, gap: 6 },
+  small:  { pad: 12, date: 12, hijri: 9,  label: 8, name: 14, time: 30, foot: 10, cardPad: 10, radius: 14, gap: 8 },
+  medium: { pad: 12, date: 14, hijri: 10, label: 8, name: 15, time: 30, foot: 10, cardPad: 10, radius: 14, gap: 8 },
   large:  { pad: 16, date: 18, hijri: 12, label: 9, name: 17, time: 34, foot: 11, cardPad: 12, radius: 22, gap: 10 },
 };
 
@@ -216,19 +216,18 @@ function addCard(parent, S, { label, item, endsAt, highlight }) {
   const top = card.addStack();
   addText(top, label, Font.semiboldSystemFont(S.label), highlight ? C.sub : C.faint);
   top.addSpacer();
-  card.addSpacer(2);
+  card.addSpacer(); // Label oben, Rest unten – Kachel füllt die Höhe
   addText(card, NAMES[item.key], Font.semiboldRoundedSystemFont(S.name), C.text);
   addText(card, hhmm(item.date), Font.boldRoundedSystemFont(S.time), C.text);
-  card.addSpacer(); // Kachel wächst nach unten bis zum Rand
+  card.addSpacer(1);
 
   const footer = card.addStack();
   footer.centerAlignContent();
   if (endsAt) {
     addText(footer, `Endet · ${hhmm(endsAt)} Uhr`, Font.mediumSystemFont(S.foot), C.sub);
   } else {
-    addText(footer, "in ", Font.mediumSystemFont(S.foot), C.sub);
     const d = footer.addDate(item.date);
-    d.applyTimerStyle();
+    d.applyRelativeStyle(); // z. B. "in 1 Std., 32 Min."
     d.font = Font.mediumSystemFont(S.foot);
     d.textColor = C.sub;
     d.lineLimit = 1;
@@ -283,7 +282,6 @@ async function buildWidget(family) {
   const w = baseWidget(S);
 
   if (SHOW_HEADER) {
-    if (family !== "large") w.addSpacer(3);
     addHeader(w, S, now, family);
     w.addSpacer(S.gap);
   }
