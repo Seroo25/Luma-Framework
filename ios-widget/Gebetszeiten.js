@@ -231,8 +231,9 @@ function addCard(parent, S, { label, item, endsAt, highlight }) {
   if (endsAt) {
     addText(footer, `Endet · ${hhmm(endsAt)} Uhr`, Font.mediumSystemFont(S.foot), C.sub);
   } else {
+    addText(footer, "in ", Font.mediumSystemFont(S.foot), C.sub);
     const d = footer.addDate(item.date);
-    d.applyRelativeStyle(); // z. B. "in 1 Std., 32 Min."
+    d.applyRelativeStyle(); // "in 1 Std., 32 Min."
     d.font = Font.mediumSystemFont(S.foot);
     d.textColor = C.sub;
     d.lineLimit = 1;
@@ -306,7 +307,11 @@ function tileWidget(now, current, next) {
     if (mode === "current") {
       addText(w, `Endet · ${hhmm(next.date)} Uhr`, Font.mediumSystemFont(13), C.sub);
     } else {
-      const d = w.addDate(item.date);
+      const r = w.addStack();
+      const pre = r.addText("in ");
+      pre.font = Font.mediumSystemFont(13);
+      pre.textColor = C.sub;
+      const d = r.addDate(item.date);
       d.applyRelativeStyle();
       d.font = Font.mediumSystemFont(13);
       d.textColor = C.sub;
