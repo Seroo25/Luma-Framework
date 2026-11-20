@@ -5,11 +5,15 @@
 // Installation:
 //   1. App "Scriptable" aus dem App Store laden (kostenlos).
 //   2. Neues Script anlegen, diesen Code einfügen, "Gebetszeiten" nennen.
-//   3. Homescreen lang drücken → "+" → Scriptable → Größe "Mittel" (beide Karten)
-//      oder "Klein" (nur nächstes Gebet) hinzufügen.
+//   3. Homescreen lang drücken → "+" → Scriptable → Größe wählen:
+//      Klein  = Datum + nächstes Gebet
+//      Mittel = Datum + aktuelles & nächstes Gebet
+//      Groß   = Datum + beide Karten + alle Gebetszeiten des Tages
 //   4. Widget lang drücken → "Widget bearbeiten" → Script: "Gebetszeiten".
-//   Tipp: Mit dem Homescreen-Stil "Klar" (Liquid Glass) legt iOS das Glas
-//   automatisch hinter das Widget.
+//   Durchsichtiges Glas: Homescreen lang drücken → "Bearbeiten" → "Anpassen"
+//   → Stil "Klar". Dann legt iOS echtes Liquid Glass hinter das Widget und
+//   passt es automatisch an den Hintergrund an (wie bei den App-Symbolen).
+//   In der Vorschau in der Scriptable-App sieht man das Glas nicht.
 
 const SOURCE_URL = "https://www.islamsalzgitter.de/gebetszeiten/";
 
@@ -23,15 +27,19 @@ const NAMES = {
 };
 const ORDER = ["fajr", "sunrise", "dhuhr", "asr", "maghrib", "isha"];
 
-// Liquid-Glass-Farben: weiß auf Glas, dezente Abstufungen
+// Islamisches Datum: ±1 Tag Korrektur, falls die Moschee abweicht
+const HIJRI_OFFSET = 0;
+
+// Liquid Glass: nur Weiß in verschiedenen Deckkräften.
+// Im Homescreen-Stil "Klar" ersetzt iOS den Hintergrund durch echtes Glas.
 const C = {
-  bgTop: new Color("#3a342e", 0.55),
-  bgBottom: new Color("#0e0d0c", 0.75),
-  cardHi: new Color("#ffffff", 0.2),
-  card: new Color("#ffffff", 0.08),
+  bg: new Color("#000000", 0.18),
+  cardHi: new Color("#ffffff", 0.22),
+  card: new Color("#ffffff", 0.1),
+  rowHi: new Color("#ffffff", 0.16),
   text: new Color("#ffffff", 1),
-  sub: new Color("#ffffff", 0.72),
-  faint: new Color("#ffffff", 0.5),
+  sub: new Color("#ffffff", 0.75),
+  faint: new Color("#ffffff", 0.55),
 };
 
 // ───────────────────────── Daten von der Moschee ─────────────────────────
@@ -118,70 +126,142 @@ function getState(data, now) {
   return { current: list[idx], next: list[idx + 1] };
 }
 
-// ───────────────────────── Layout ─────────────────────────
-const hhmm = (d) => {
+// ───────────────────────── Datum ─────────────────────────
+const HIJRI_MONTHS = [
+  "Muharram", "Safar", "Rabî^ al-Awwal", "Rabî^ ath-Thânî", "Jumâdâ al-Ûlâ", "Jumâdâ al-Âkhira",
+  "Rajab", "Sha^bân", "Ramadân", "Shawwâl", "Dhû l-Qa^da", "Dhû l-Hijja",
+];
+
+function hijriParts(date) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate() + HIJRI_OFFSET, 12);
+  try {
+    const parts = new Intl.DateTimeFormat("en-u-ca-islamic-umalqura", { day: "numeric", month: "numeric", year: "numeric" }).formatToParts(d);
+    const get = (t) => Number(parts.find((p) => p.type === t).value);
+    if (get("year") > 1400) return { day: get("day"), month: get("month"), year: get("year") };
+  } catch (e) { /* Fallback unten */ }
+  // Tabellarischer islamischer Kalender (falls Intl fehlt)
+  const jd = Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 864e5 + 2440588) + 1;
+  let l = jd - 1948440 + 10632;
+  const n = Math.floor((l - 1) / 10631);
+  l = l - 10631 * n + 354;
+  const j = Math.floor((10985 - l) / 5316) * Math.floor((50 * l) / 17719) + Math.floor(l / 5670) * Math.floor((43 * l) / 15238);
+  l = l - Math.floor((30 - j) / 15) * Math.floor((17719 * j) / 50) - Math.floor(j / 16) * Math.floor((15238 * j) / 43) + 29;
+  const month = Math.floor((24 * l) / 709);
+  return { day: l - Math.floor((709 * month) / 24), month, year: 30 * n + j - 30 };
+}
+
+function hijriText(date) {
+  const h = hijriParts(date);
+  return `Tag von ${h.day}. ${HIJRI_MONTHS[h.month - 1]} ${h.year}`;
+}
+
+function dateText(date, format) {
   const df = new DateFormatter();
-  df.dateFormat = "HH:mm";
-  return df.string(d);
+  df.locale = "de_DE";
+  df.dateFormat = format;
+  return df.string(date);
+}
+
+// ───────────────────────── Layout ─────────────────────────
+const hhmm = (d) => dateText(d, "HH:mm");
+
+// Schriftgrößen je Widget-Größe
+const SIZES = {
+  small:  { pad: 12, date: 12, hijri: 9,  label: 8, name: 13, time: 26, foot: 10, cardPad: 9,  radius: 16, gap: 6 },
+  medium: { pad: 12, date: 14, hijri: 10, label: 8, name: 14, time: 24, foot: 10, cardPad: 9,  radius: 18, gap: 8 },
+  large:  { pad: 16, date: 18, hijri: 12, label: 9, name: 17, time: 34, foot: 11, cardPad: 12, radius: 22, gap: 10 },
 };
 
-function baseWidget() {
+function baseWidget(S) {
   const w = new ListWidget();
-  const g = new LinearGradient();
-  g.colors = [C.bgTop, C.bgBottom];
-  g.locations = [0, 1];
-  g.startPoint = new Point(0, 0);
-  g.endPoint = new Point(1, 1);
-  w.backgroundGradient = g;
-  w.setPadding(10, 10, 10, 10);
+  w.backgroundColor = C.bg;
+  w.setPadding(S.pad, S.pad, S.pad, S.pad);
   w.url = SOURCE_URL;
   return w;
 }
 
-function addText(stack, str, font, color) {
+function addText(stack, str, font, color, scale = 0.6) {
   const t = stack.addText(str);
   t.font = font;
   t.textColor = color;
   t.lineLimit = 1;
-  t.minimumScaleFactor = 0.6;
+  t.minimumScaleFactor = scale;
   return t;
 }
 
-function addCard(parent, { label, item, endsAt, highlight }) {
+function addHeader(w, S, now, family) {
+  const head = w.addStack();
+  head.layoutVertically();
+  const row1 = head.addStack();
+  row1.addSpacer();
+  addText(row1, dateText(now, family === "small" ? "EEEE, d. MMM" : "EEEE, d. MMMM yyyy"), Font.boldRoundedSystemFont(S.date), C.text);
+  row1.addSpacer();
+  head.addSpacer(1);
+  const row2 = head.addStack();
+  row2.addSpacer();
+  addText(row2, hijriText(now), Font.mediumSystemFont(S.hijri), C.sub);
+  row2.addSpacer();
+}
+
+function addCard(parent, S, { label, item, endsAt, highlight }) {
   const card = parent.addStack();
   card.layoutVertically();
-  card.cornerRadius = 20;
-  card.setPadding(11, 12, 11, 12);
+  card.cornerRadius = S.radius;
+  card.setPadding(S.cardPad, S.cardPad + 2, S.cardPad, S.cardPad + 2);
   card.backgroundColor = highlight ? C.cardHi : C.card;
 
-  addText(card, label, Font.semiboldSystemFont(9), C.faint);
-  card.addSpacer(3);
-  addText(card, NAMES[item.key], Font.semiboldRoundedSystemFont(16), C.text);
-  addText(card, hhmm(item.date), Font.boldRoundedSystemFont(34), C.text);
-  card.addSpacer();
+  const top = card.addStack();
+  addText(top, label, Font.semiboldSystemFont(S.label), highlight ? C.sub : C.faint);
+  top.addSpacer();
+  card.addSpacer(2);
+  addText(card, NAMES[item.key], Font.semiboldRoundedSystemFont(S.name), C.text);
+  addText(card, hhmm(item.date), Font.boldRoundedSystemFont(S.time), C.text);
+  card.addSpacer(2);
 
   const footer = card.addStack();
   footer.centerAlignContent();
   if (endsAt) {
-    addText(footer, `Endet · ${hhmm(endsAt)} Uhr`, Font.mediumSystemFont(11), C.sub);
+    addText(footer, `Endet · ${hhmm(endsAt)} Uhr`, Font.mediumSystemFont(S.foot), C.sub);
   } else {
-    addText(footer, "in ", Font.mediumSystemFont(11), C.sub);
+    addText(footer, "in ", Font.mediumSystemFont(S.foot), C.sub);
     const d = footer.addDate(item.date);
     d.applyTimerStyle();
-    d.font = Font.mediumSystemFont(11);
+    d.font = Font.mediumSystemFont(S.foot);
     d.textColor = C.sub;
+    d.lineLimit = 1;
   }
   footer.addSpacer();
   return card;
 }
 
-function errorWidget() {
-  const w = baseWidget();
+function addDayList(w, S, data, now, current) {
+  const today = timesFor(data, now);
+  const list = w.addStack();
+  list.layoutVertically();
+  list.cornerRadius = S.radius;
+  list.backgroundColor = C.card;
+  list.setPadding(6, 6, 6, 6);
+  ORDER.forEach((k, i) => {
+    const active = current.key === k && current.date.getDate() === now.getDate();
+    const row = list.addStack();
+    row.setPadding(5, 10, 5, 10);
+    row.cornerRadius = 10;
+    row.centerAlignContent();
+    if (active) row.backgroundColor = C.rowHi;
+    const font = active ? Font.semiboldRoundedSystemFont(15) : Font.mediumRoundedSystemFont(15);
+    addText(row, NAMES[k], font, active ? C.text : C.sub);
+    row.addSpacer();
+    addText(row, hhmm(at(now, today[i])), font, active ? C.text : C.sub);
+  });
+}
+
+function errorWidget(S) {
+  const w = baseWidget(S);
   w.addSpacer();
   const t = addText(w, "Gebetszeiten", Font.semiboldRoundedSystemFont(15), C.text);
   t.centerAlignText();
   w.addSpacer(4);
-  const s = w.addText("Seite gerade nicht erreichbar");
+  const s = w.addText("Daten gerade nicht erreichbar");
   s.font = Font.mediumSystemFont(11);
   s.textColor = C.sub;
   s.centerAlignText();
@@ -190,33 +270,51 @@ function errorWidget() {
   return w;
 }
 
-async function buildWidget() {
+async function buildWidget(family) {
+  const S = SIZES[family] || SIZES.medium;
   const now = new Date();
   const data = await loadData();
-  if (!data) return errorWidget();
+  if (!data) return errorWidget(S);
 
   const { current, next } = getState(data, now);
-  const w = baseWidget();
+  const w = baseWidget(S);
 
-  if (config.widgetFamily === "small") {
-    addCard(w, { label: "NÄCHSTES GEBET", item: next });
+  addHeader(w, S, now, family);
+  w.addSpacer(S.gap);
+
+  if (family === "small") {
+    addCard(w, S, { label: "NÄCHSTES GEBET", item: next });
   } else {
     const row = w.addStack();
     row.layoutHorizontally();
-    addCard(row, { label: "AKTUELLES GEBET", item: current, endsAt: next.date, highlight: true });
-    row.addSpacer(8);
-    addCard(row, { label: "NÄCHSTES GEBET", item: next });
+    addCard(row, S, { label: "AKTUELLES GEBET", item: current, endsAt: next.date, highlight: true });
+    row.addSpacer(S.gap);
+    addCard(row, S, { label: "NÄCHSTES GEBET", item: next });
+    if (family === "large") {
+      w.addSpacer(S.gap);
+      addDayList(w, S, data, now, current);
+    }
   }
+  w.addSpacer();
 
-  w.refreshAfterDate = new Date(next.date.getTime() + 30 * 1000);
+  // Nach dem nächsten Gebet bzw. um Mitternacht (neues Datum) neu laden
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 30);
+  w.refreshAfterDate = new Date(Math.min(next.date.getTime() + 30 * 1000, midnight.getTime()));
   return w;
 }
 
 // ───────────────────────── Start ─────────────────────────
-const widget = await buildWidget();
 if (config.runsInWidget) {
-  Script.setWidget(widget);
+  Script.setWidget(await buildWidget(config.widgetFamily));
 } else {
-  await widget.presentMedium();
+  // Vorschau in der App: Größe auswählen
+  const a = new Alert();
+  a.title = "Vorschau";
+  ["Klein", "Mittel", "Groß"].forEach((t) => a.addAction(t));
+  a.addCancelAction("Abbrechen");
+  const i = await a.presentSheet();
+  if (i === 0) await (await buildWidget("small")).presentSmall();
+  if (i === 1) await (await buildWidget("medium")).presentMedium();
+  if (i === 2) await (await buildWidget("large")).presentLarge();
 }
 Script.complete();
